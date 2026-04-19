@@ -1,7 +1,6 @@
 use {
     crate::{
         encoding::{
-            SchemaAttr,
             build_config_msgpack,
             json_to_msgpack,
             msgpack_to_json,
@@ -70,7 +69,8 @@ impl ExTerra {
 impl Provider {
     pub async fn create(&mut self, resource_type: &str, input: Params) -> Result<ResourceState, anyhow::Error> {
         let attrs = self.p.get_resource_schema(resource_type)?;
-        let (config_mp, proposed_mp) = build_config_and_proposed(&attrs, &input.0)?;
+        let config_mp = build_config_msgpack(&attrs, &input.0, false)?;
+        let proposed_mp = build_config_msgpack(&attrs, &input.0, true)?;
         let prior_mp = null_msgpack();
         let plan = self.p.plan(&resource_type, prior_mp.clone(), proposed_mp, config_mp.clone(), vec![]).await?;
         let new_state_mp =
@@ -82,11 +82,33 @@ impl Provider {
         &mut self,
         resource_type: &str,
         state: ResourceState,
-        input: Params,
+        params: Params,
     ) -> Result<ResourceState, anyhow::Error> {
         let attrs = self.p.get_resource_schema(resource_type)?;
-        let prior_mp = state_to_msgpack(&state.0)?;
-        let (config_mp, proposed_mp) = build_config_and_proposed_with_prior(&attrs, &input.0, &state.0)?;
+        let prior_mp = state_to_msgpack(&state)?;
+
+        // Computed-only attributes (no required/optional flag) are filled in by the
+        // provider.  They must appear as the unknown sentinel in proposed_new_state so
+        // the provider knows to recompute them.  Copying the prior value would tell the
+        // provider "this attr won't change" and suppress the update.
+        let pure_computed_field_names: std::collections::HashSet<&str> =
+            attrs.iter().filter(|a| a.computed && !a.optional && !a.required).map(|a| a.name.as_str()).collect();
+
+        // Build a merged map: prior optional/required values + new_values override.
+        // Computed-only attrs are intentionally omitted so they become unknown.
+        let mut merged = serde_json::Map::new();
+        if let serde_json::Value::Object(prior_map) = state.0 {
+            for (k, v) in prior_map {
+                if !pure_computed_field_names.contains(k.as_str()) {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        for (k, v) in &params.0 {
+            merged.insert(k.clone(), v.clone());
+        }
+        let config_mp = build_config_msgpack(&attrs, &params.0, false)?;
+        let proposed_mp = build_config_msgpack(&attrs, &merged, true)?;
         let plan = self.p.plan(&resource_type, prior_mp.clone(), proposed_mp, config_mp.clone(), vec![]).await?;
         if plan.requires_replace {
             return Err(
@@ -102,7 +124,7 @@ impl Provider {
     }
 
     pub async fn delete(&mut self, resource_type: &str, state: ResourceState) -> Result<(), anyhow::Error> {
-        let prior_mp = state_to_msgpack(&state.0)?;
+        let prior_mp = state_to_msgpack(&state)?;
         let null_mp = null_msgpack();
         let plan = self.p.plan(&resource_type, prior_mp.clone(), null_mp.clone(), null_mp.clone(), vec![]).await?;
         self.p.apply(&resource_type, prior_mp, plan.planned_state, null_mp, plan.planned_private).await?;
@@ -110,53 +132,9 @@ impl Provider {
     }
 }
 
-/// Build (config_msgpack, proposed_new_state_msgpack) for a create operation.
-/// config: user values + null for computed-only. proposed: user values + unknown
-/// sentinel for computed-only.
-fn build_config_and_proposed(
-    attrs: &[SchemaAttr],
-    values: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(Vec<u8>, Vec<u8>), anyhow::Error> {
-    let config = build_config_msgpack(attrs, values, false)?;
-    let proposed = build_config_msgpack(attrs, values, true)?;
-    Ok((config, proposed))
-}
-
-/// Like above but for modify: proposed_new_state merges new config values with
-/// prior computed values so the provider can detect what changed.
-fn build_config_and_proposed_with_prior(
-    attrs: &[SchemaAttr],
-    new_values: &serde_json::Map<String, serde_json::Value>,
-    prior_values: &serde_json::Value,
-) -> Result<(Vec<u8>, Vec<u8>), anyhow::Error> {
-    // Computed-only attributes (no required/optional flag) are filled in by the
-    // provider.  They must appear as the unknown sentinel in proposed_new_state so
-    // the provider knows to recompute them.  Copying the prior value would tell the
-    // provider "this attr won't change" and suppress the update.
-    let pure_computed_field_names: std::collections::HashSet<&str> =
-        attrs.iter().filter(|a| a.computed && !a.optional && !a.required).map(|a| a.name.as_str()).collect();
-
-    // Build a merged map: prior optional/required values + new_values override.
-    // Computed-only attrs are intentionally omitted so they become unknown.
-    let mut merged = serde_json::Map::new();
-    if let serde_json::Value::Object(prior_map) = prior_values {
-        for (k, v) in prior_map {
-            if !pure_computed_field_names.contains(k.as_str()) {
-                merged.insert(k.clone(), v.clone());
-            }
-        }
-    }
-    for (k, v) in new_values {
-        merged.insert(k.clone(), v.clone());
-    }
-    let config = build_config_msgpack(attrs, new_values, false)?;
-    let proposed = build_config_msgpack(attrs, &merged, true)?;
-    Ok((config, proposed))
-}
-
-fn state_to_msgpack(state: &serde_json::Value) -> Result<Vec<u8>, anyhow::Error> {
+fn state_to_msgpack(state: &ResourceState) -> Result<Vec<u8>, anyhow::Error> {
     let mut buf = Vec::new();
-    json_to_msgpack(state, &mut buf)?;
+    json_to_msgpack(&state.0, &mut buf)?;
     Ok(buf)
 }
 
@@ -168,13 +146,12 @@ fn state_from_msgpack(new_state_mp: &[u8]) -> Result<ResourceState, anyhow::Erro
     return Ok(
         ResourceState(
             msgpack_to_json(
-                rmpv::decode::read_value(&mut rd).context("Error decoding provider state")?,
-            ).context("Error decoding provider state 2")?,
+                rmpv::decode::read_value(&mut rd).context("Error decoding resource state")?,
+            ).context("Error converting resource state messagepack to json")?,
         ),
     );
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
     use {

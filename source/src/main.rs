@@ -1,36 +1,38 @@
+mod encoding;
+mod operations;
+mod provider;
+
 use std::path::PathBuf;
-use aargvark::{
-    Aargvark,
-    vark,
-};
+
+use aargvark::{vark, Aargvark};
 
 #[derive(Aargvark)]
 struct CreateCommand {
-    /// Path to the terraform provider binary
+    /// Path to the terraform provider binary.
     provider: PathBuf,
-    /// Path to the input JSON file
+    /// Path to the input JSON file (resource type and desired values).
     input: PathBuf,
-    /// Path to write the output state JSON file
+    /// Path to write the output state JSON file.
     output_state: PathBuf,
 }
 
 #[derive(Aargvark)]
 struct ModifyCommand {
-    /// Path to the terraform provider binary
+    /// Path to the terraform provider binary.
     provider: PathBuf,
-    /// Path to the input JSON file
+    /// Path to the input JSON file (new desired values).
     input: PathBuf,
-    /// Path to the current state JSON file
+    /// Path to the current state JSON file.
     state: PathBuf,
-    /// Path to write the output state JSON file
+    /// Path to write the output state JSON file.
     output_state: PathBuf,
 }
 
 #[derive(Aargvark)]
 struct DeleteCommand {
-    /// Path to the terraform provider binary
+    /// Path to the terraform provider binary.
     provider: PathBuf,
-    /// Path to the state JSON file
+    /// Path to the state JSON file.
     state: PathBuf,
 }
 
@@ -41,32 +43,19 @@ enum Command {
     Delete(DeleteCommand),
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Install the ring crypto provider for rustls (required by rustls 0.23).
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let command = vark::<Command>();
     match command {
         Command::Create(c) => {
-            println!(
-                "Create: provider={}, input={}, output_state={}",
-                c.provider.display(),
-                c.input.display(),
-                c.output_state.display()
-            );
+            operations::create(&c.provider, &c.input, &c.output_state).await
         }
         Command::Modify(m) => {
-            println!(
-                "Modify: provider={}, input={}, state={}, output_state={}",
-                m.provider.display(),
-                m.input.display(),
-                m.state.display(),
-                m.output_state.display()
-            );
+            operations::modify(&m.provider, &m.input, &m.state, &m.output_state).await
         }
-        Command::Delete(d) => {
-            println!(
-                "Delete: provider={}, state={}",
-                d.provider.display(),
-                d.state.display()
-            );
-        }
+        Command::Delete(d) => operations::delete(&d.provider, &d.state).await,
     }
 }

@@ -235,6 +235,7 @@ impl Provider {
                     .configure(Configure5Req {
                         terraform_version: "1.0.0".into(),
                         config: Some(dv5(config_mp)),
+                        ..Default::default()
                     })
                     .await?
                     .into_inner();
@@ -245,6 +246,7 @@ impl Provider {
                     .configure_provider(Configure6Req {
                         terraform_version: "1.0.0".into(),
                         config: Some(dv6(config_mp)),
+                        ..Default::default()
                     })
                     .await?
                     .into_inner();
@@ -272,6 +274,7 @@ impl Provider {
                         proposed_new_state: Some(dv5(proposed_new_state)),
                         config: Some(dv5(config)),
                         prior_private,
+                        ..Default::default()
                     })
                     .await?
                     .into_inner();
@@ -290,6 +293,7 @@ impl Provider {
                         proposed_new_state: Some(dv6(proposed_new_state)),
                         config: Some(dv6(config)),
                         prior_private,
+                        ..Default::default()
                     })
                     .await?
                     .into_inner();
@@ -322,6 +326,7 @@ impl Provider {
                         planned_state: Some(dv5(planned_state)),
                         config: Some(dv5(config)),
                         planned_private,
+                        ..Default::default()
                     })
                     .await?
                     .into_inner();
@@ -336,6 +341,7 @@ impl Provider {
                         planned_state: Some(dv6(planned_state)),
                         config: Some(dv6(config)),
                         planned_private,
+                        ..Default::default()
                     })
                     .await?
                     .into_inner();

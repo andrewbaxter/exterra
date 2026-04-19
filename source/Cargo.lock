@@ -480,6 +480,7 @@ dependencies = [
  "base64",
  "hyper-util",
  "prost",
+ "prost-types",
  "protox",
  "rcgen",
  "rmp",

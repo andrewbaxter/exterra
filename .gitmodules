@@ -1,0 +1,3 @@
+[submodule "source/terraform-plugin-go"]
+	path = source/terraform-plugin-go
+	url = https://github.com/hashicorp/terraform-plugin-go.git

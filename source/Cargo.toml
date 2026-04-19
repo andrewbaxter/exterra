@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-aargvark = "0"
+aargvark = { version = "0", features = ["serde_json"] }
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
@@ -28,3 +28,6 @@ tempfile = "3"
 [build-dependencies]
 tonic-build = "0.12"
 protox = "0.7"
+
+[lints.clippy]
+all = "allow"

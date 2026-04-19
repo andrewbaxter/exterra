@@ -184,6 +184,7 @@ pub async fn new(
         #[derive(Debug)]
         struct PinnedCertVerifier {
             expected_der: Vec<u8>,
+            crypto: Arc<rustls::crypto::CryptoProvider>,
         }
 
         impl ServerCertVerifier for PinnedCertVerifier {
@@ -212,7 +213,7 @@ pub async fn new(
                     message,
                     cert,
                     dss,
-                    &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+                    &self.crypto.signature_verification_algorithms,
                 )
             }
 
@@ -226,18 +227,22 @@ pub async fn new(
                     message,
                     cert,
                     dss,
-                    &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+                    &self.crypto.signature_verification_algorithms,
                 )
             }
 
             fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-                rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms.supported_schemes()
+                self.crypto.signature_verification_algorithms.supported_schemes()
             }
         }
 
-        let verifier = Arc::new(PinnedCertVerifier { expected_der: provider_cert_der.to_vec() });
+        let verifier = Arc::new(PinnedCertVerifier {
+            expected_der: provider_cert_der.to_vec(),
+            crypto: shared.crypto.clone(),
+        });
         let mut tls_cfg =
-            rustls::ClientConfig::builder()
+            rustls::ClientConfig::builder_with_provider(shared.crypto.clone())
+                .with_safe_default_protocol_versions()?
                 .dangerous()
                 .with_custom_certificate_verifier(verifier)
                 .with_client_auth_cert(

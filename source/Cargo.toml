@@ -3,6 +3,9 @@ name = "exterra"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+doctest = false
+
 [dependencies]
 aargvark = { version = "0", features = ["serde_json"] }
 tokio = { version = "1", features = ["full"] }

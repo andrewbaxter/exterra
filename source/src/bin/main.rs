@@ -46,8 +46,6 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    // Install the ring crypto provider for rustls (required by rustls 0.23).
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let command = vark::<Command>();
     match command {
         Command::Create(c) => {

@@ -67,6 +67,21 @@ impl ExTerra {
 }
 
 impl Provider {
+    pub fn list_resource_types(&self) -> Vec<String> {
+        self.p.list_resource_types()
+    }
+
+    pub async fn refresh(&mut self, resource_type: &str, state: ResourceState) -> Result<ResourceState, anyhow::Error> {
+        let current_mp = state_to_msgpack(&state)?;
+        let new_mp = self.p.read(resource_type, current_mp, vec![]).await?;
+        return Ok(state_from_msgpack(&new_mp)?);
+    }
+
+    pub async fn import(&mut self, resource_type: &str, id: &str) -> Result<ResourceState, anyhow::Error> {
+        let new_mp = self.p.import(resource_type, id).await?;
+        return Ok(state_from_msgpack(&new_mp)?);
+    }
+
     pub async fn create(&mut self, resource_type: &str, input: Params) -> Result<ResourceState, anyhow::Error> {
         let attrs = self.p.get_resource_schema(resource_type)?;
         let config_mp = build_config_msgpack(&attrs, &input.0, false)?;

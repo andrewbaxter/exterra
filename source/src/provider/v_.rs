@@ -20,7 +20,19 @@ pub(crate) struct PlanResult {
 }
 
 pub(crate) trait ProviderInnerImpl {
+    fn list_resource_types(&self) -> Vec<String>;
     fn get_resource_schema(&self, type_: &str) -> Result<Vec<SchemaAttr>, anyhow::Error>;
+    async fn read(
+        &mut self,
+        resource_type: &str,
+        current_state: Vec<u8>,
+        private: Vec<u8>,
+    ) -> Result<Vec<u8>, anyhow::Error>;
+    async fn import(
+        &mut self,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<Vec<u8>, anyhow::Error>;
     async fn plan(
         &mut self,
         resource_type: &str,

@@ -96,6 +96,12 @@ impl ProviderInner {
 }
 
 impl ProviderInnerImpl for ProviderInner {
+    fn list_resource_types(&self) -> Vec<String> {
+        let mut types: Vec<String> = self.schema.resource_schemas.keys().cloned().collect();
+        types.sort();
+        types
+    }
+
     fn get_resource_schema(&self, type_: &str) -> Result<Vec<SchemaAttr>, anyhow::Error> {
         return Ok(
             block_attrs(
@@ -110,6 +116,38 @@ impl ProviderInnerImpl for ProviderInner {
                     .as_ref(),
             ),
         );
+    }
+
+    async fn read(
+        &mut self,
+        resource_type: &str,
+        current_state: Vec<u8>,
+        private: Vec<u8>,
+    ) -> Result<Vec<u8>, anyhow::Error> {
+        let resp = self.c.read_resource(proto::read_resource::Request {
+            type_name: resource_type.into(),
+            current_state: Some(dv(current_state)),
+            private,
+            ..Default::default()
+        }).await?.into_inner();
+        check_diags(&resp.diagnostics)?;
+        return Ok(extract(resp.new_state));
+    }
+
+    async fn import(
+        &mut self,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<Vec<u8>, anyhow::Error> {
+        let resp = self.c.import_resource_state(proto::import_resource_state::Request {
+            type_name: resource_type.into(),
+            id: id.into(),
+            ..Default::default()
+        }).await?.into_inner();
+        check_diags(&resp.diagnostics)?;
+        let imported = resp.imported_resources.into_iter().next()
+            .ok_or_else(|| anyhow::anyhow!("Provider returned no imported resources for [{}] id [{}]", resource_type, id))?;
+        return Ok(extract(imported.state));
     }
 
     async fn plan(

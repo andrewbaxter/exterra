@@ -70,6 +70,13 @@ pub enum ProviderInner {
 }
 
 impl v_::ProviderInnerImpl for ProviderInner {
+    fn list_resource_types(&self) -> Vec<String> {
+        match self {
+            ProviderInner::V5(v) => v.list_resource_types(),
+            ProviderInner::V6(v) => v.list_resource_types(),
+        }
+    }
+
     fn get_resource_schema(
         &self,
         type_: &str,
@@ -77,6 +84,29 @@ impl v_::ProviderInnerImpl for ProviderInner {
         match self {
             ProviderInner::V5(v) => v.get_resource_schema(type_),
             ProviderInner::V6(v) => v.get_resource_schema(type_),
+        }
+    }
+
+    async fn read(
+        &mut self,
+        resource_type: &str,
+        current_state: Vec<u8>,
+        private: Vec<u8>,
+    ) -> std::result::Result<Vec<u8>, anyhow::Error> {
+        match &mut *self {
+            ProviderInner::V5(v) => v.read(resource_type, current_state, private).await,
+            ProviderInner::V6(v) => v.read(resource_type, current_state, private).await,
+        }
+    }
+
+    async fn import(
+        &mut self,
+        resource_type: &str,
+        id: &str,
+    ) -> std::result::Result<Vec<u8>, anyhow::Error> {
+        match &mut *self {
+            ProviderInner::V5(v) => v.import(resource_type, id).await,
+            ProviderInner::V6(v) => v.import(resource_type, id).await,
         }
     }
 

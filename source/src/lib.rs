@@ -82,14 +82,20 @@ impl Provider {
         return Ok(state_from_msgpack(&new_mp)?);
     }
 
-    pub async fn create(&mut self, resource_type: &str, input: Params) -> Result<ResourceState, anyhow::Error> {
-        let attrs = self.p.get_resource_schema(resource_type)?;
+    pub async fn create(&mut self, type_: &str, input: Params) -> Result<ResourceState, anyhow::Error> {
+        if let Some(datasource_type) = type_.strip_prefix("data.") {
+            let attrs = self.p.get_datasource_schema(datasource_type)?;
+            let config_mp = build_config_msgpack(&attrs, &input.0, false)?;
+            let state_mp = self.p.read_datasource(datasource_type, config_mp).await?;
+            return Ok(state_from_msgpack(&state_mp)?);
+        }
+        let attrs = self.p.get_resource_schema(type_)?;
         let config_mp = build_config_msgpack(&attrs, &input.0, false)?;
         let proposed_mp = build_config_msgpack(&attrs, &input.0, true)?;
         let prior_mp = null_msgpack();
-        let plan = self.p.plan(&resource_type, prior_mp.clone(), proposed_mp, config_mp.clone(), vec![]).await?;
+        let plan = self.p.plan(type_, prior_mp.clone(), proposed_mp, config_mp.clone(), vec![]).await?;
         let new_state_mp =
-            self.p.apply(&resource_type, prior_mp, plan.planned_state, config_mp, plan.planned_private).await?;
+            self.p.apply(type_, prior_mp, plan.planned_state, config_mp, plan.planned_private).await?;
         return Ok(state_from_msgpack(&new_state_mp)?);
     }
 
@@ -222,6 +228,33 @@ mod tests {
                 )
                 .await?;
         return Ok(state);
+    }
+
+    const DATASOURCE_TYPE: &str = "data.local_file";
+
+    #[tokio::test]
+    async fn test_create_datasource_reads_file() -> anyhow::Result<()> {
+        let work_dir = TempDir::new()?;
+        let target = work_dir.path().join("input.txt");
+        std::fs::write(&target, "datasource content")?;
+
+        let mut p = provider().await?;
+        let state = p
+            .create(
+                DATASOURCE_TYPE,
+                Params(
+                    [(
+                        "filename".to_string(),
+                        serde_json::Value::String(target.to_str().unwrap().to_string()),
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+            )
+            .await?;
+
+        assert_eq!(state.0["content"], "datasource content");
+        return Ok(());
     }
 
     #[tokio::test]

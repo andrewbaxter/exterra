@@ -87,6 +87,27 @@ impl v_::ProviderInnerImpl for ProviderInner {
         }
     }
 
+    fn get_datasource_schema(
+        &self,
+        type_: &str,
+    ) -> std::result::Result<Vec<crate::encoding::SchemaAttr>, anyhow::Error> {
+        match self {
+            ProviderInner::V5(v) => v.get_datasource_schema(type_),
+            ProviderInner::V6(v) => v.get_datasource_schema(type_),
+        }
+    }
+
+    async fn read_datasource(
+        &mut self,
+        type_: &str,
+        config: Vec<u8>,
+    ) -> std::result::Result<Vec<u8>, anyhow::Error> {
+        match &mut *self {
+            ProviderInner::V5(v) => v.read_datasource(type_, config).await,
+            ProviderInner::V6(v) => v.read_datasource(type_, config).await,
+        }
+    }
+
     async fn read(
         &mut self,
         resource_type: &str,

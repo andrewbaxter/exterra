@@ -118,6 +118,36 @@ impl ProviderInnerImpl for ProviderInner {
         );
     }
 
+    fn get_datasource_schema(&self, type_: &str) -> Result<Vec<SchemaAttr>, anyhow::Error> {
+        return Ok(
+            block_attrs(
+                self
+                    .schema
+                    .data_source_schemas
+                    .get(type_)
+                    .ok_or_else(
+                        || anyhow::anyhow!("Provider has no schema for datasource [{}], is the name correct?", type_),
+                    )?
+                    .block
+                    .as_ref(),
+            ),
+        );
+    }
+
+    async fn read_datasource(
+        &mut self,
+        type_: &str,
+        config: Vec<u8>,
+    ) -> Result<Vec<u8>, anyhow::Error> {
+        let resp = self.c.read_data_source(proto::read_data_source::Request {
+            type_name: type_.into(),
+            config: Some(dv(config)),
+            ..Default::default()
+        }).await?.into_inner();
+        check_diags(&resp.diagnostics)?;
+        return Ok(extract(resp.state));
+    }
+
     async fn read(
         &mut self,
         resource_type: &str,

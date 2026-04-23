@@ -104,6 +104,13 @@ impl v_::ProviderInnerImpl for ProviderInner {
         }
     }
 
+    fn get_resource_schema_version(&self, type_: &str) -> i64 {
+        match self {
+            ProviderInner::V5(v) => v.get_resource_schema_version(type_),
+            ProviderInner::V6(v) => v.get_resource_schema_version(type_),
+        }
+    }
+
     async fn read_datasource(
         &mut self,
         type_: &str,
@@ -171,6 +178,18 @@ impl v_::ProviderInnerImpl for ProviderInner {
             ProviderInner::V6(v) => v
                 .apply(resource_type, prior_state, planned_state, config, planned_private)
                 .await,
+        }
+    }
+
+    async fn upgrade_resource_state(
+        &mut self,
+        resource_type: &str,
+        version: i64,
+        raw_state_json: Vec<u8>,
+    ) -> std::result::Result<Vec<u8>, anyhow::Error> {
+        match &mut *self {
+            ProviderInner::V5(v) => v.upgrade_resource_state(resource_type, version, raw_state_json).await,
+            ProviderInner::V6(v) => v.upgrade_resource_state(resource_type, version, raw_state_json).await,
         }
     }
 }

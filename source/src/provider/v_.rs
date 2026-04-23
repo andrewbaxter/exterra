@@ -24,6 +24,7 @@ pub(crate) trait ProviderInnerImpl {
     fn get_provider_schema_attrs(&self) -> Vec<SchemaAttr>;
     fn get_resource_schema(&self, type_: &str) -> Result<Vec<SchemaAttr>, anyhow::Error>;
     fn get_datasource_schema(&self, type_: &str) -> Result<Vec<SchemaAttr>, anyhow::Error>;
+    fn get_resource_schema_version(&self, type_: &str) -> i64;
     async fn read_datasource(
         &mut self,
         type_: &str,
@@ -55,5 +56,11 @@ pub(crate) trait ProviderInnerImpl {
         planned_state: Vec<u8>,
         config: Vec<u8>,
         planned_private: Vec<u8>,
+    ) -> Result<Vec<u8>, anyhow::Error>;
+    async fn upgrade_resource_state(
+        &mut self,
+        resource_type: &str,
+        version: i64,
+        raw_state_json: Vec<u8>,
     ) -> Result<Vec<u8>, anyhow::Error>;
 }

@@ -9,7 +9,10 @@ use {
             PlanResult,
         },
     },
-    std::process::Child,
+    std::{
+        collections::HashMap,
+        process::Child,
+    },
     tonic::transport::Channel,
 };
 
@@ -139,6 +142,16 @@ impl ProviderInnerImpl for ProviderInner {
         );
     }
 
+    fn get_resource_schema_version(&self, type_: &str) -> i64 {
+        return self
+            .schema
+            .resource_schemas
+            .get(type_)
+            .and_then(|s| s.block.as_ref())
+            .map(|b| b.version)
+            .unwrap_or(0);
+    }
+
     async fn read_datasource(
         &mut self,
         type_: &str,
@@ -227,5 +240,23 @@ impl ProviderInnerImpl for ProviderInner {
         }).await?.into_inner();
         check_diags(&resp.diagnostics)?;
         return Ok(extract(resp.new_state));
+    }
+
+    async fn upgrade_resource_state(
+        &mut self,
+        resource_type: &str,
+        version: i64,
+        raw_state_json: Vec<u8>,
+    ) -> Result<Vec<u8>, anyhow::Error> {
+        let resp = self.c.upgrade_resource_state(proto::upgrade_resource_state::Request {
+            type_name: resource_type.into(),
+            version,
+            raw_state: Some(proto::RawState {
+                json: raw_state_json,
+                flatmap: HashMap::new(),
+            }),
+        }).await?.into_inner();
+        check_diags(&resp.diagnostics)?;
+        return Ok(extract(resp.upgraded_state));
     }
 }

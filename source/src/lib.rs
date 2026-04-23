@@ -39,7 +39,10 @@ mod provider;
 pub struct Params(pub serde_json::Map<String, serde_json::Value>);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ResourceState(pub serde_json::Value);
+pub struct ResourceState {
+    pub state: serde_json::Value,
+    pub schema_version: i64,
+}
 
 #[derive(Clone)]
 pub struct ExTerra {
@@ -117,16 +120,30 @@ impl Provider {
         });
     }
 
+    async fn maybe_upgrade_state(&mut self, resource_type: &str, state: ResourceState) -> Result<ResourceState, anyhow::Error> {
+        let current_version = self.p.get_resource_schema_version(resource_type);
+        if state.schema_version < current_version {
+            let raw_json = serde_json::to_vec(&state.state)
+                .context("Error serializing state for upgrade")?;
+            let upgraded_mp = self.p.upgrade_resource_state(resource_type, state.schema_version, raw_json).await?;
+            return Ok(state_from_msgpack(&upgraded_mp, current_version)?);
+        }
+        Ok(state)
+    }
+
     pub async fn refresh(&mut self, resource_type: &str, state: ResourceState) -> Result<ResourceState, anyhow::Error> {
-        check_schema(&self.state_schemask(resource_type)?, &state.0)?;
+        let state = self.maybe_upgrade_state(resource_type, state).await?;
+        check_schema(&self.state_schemask(resource_type)?, &state.state)?;
         let current_mp = state_to_msgpack(&state)?;
         let new_mp = self.p.read(resource_type, current_mp, vec![]).await?;
-        return Ok(state_from_msgpack(&new_mp)?);
+        let current_version = self.p.get_resource_schema_version(resource_type);
+        return Ok(state_from_msgpack(&new_mp, current_version)?);
     }
 
     pub async fn import(&mut self, resource_type: &str, id: &str) -> Result<ResourceState, anyhow::Error> {
         let new_mp = self.p.import(resource_type, id).await?;
-        return Ok(state_from_msgpack(&new_mp)?);
+        let current_version = self.p.get_resource_schema_version(resource_type);
+        return Ok(state_from_msgpack(&new_mp, current_version)?);
     }
 
     pub async fn create(&mut self, type_: &str, input: Params) -> Result<ResourceState, anyhow::Error> {
@@ -143,7 +160,8 @@ impl Provider {
             check_schema(&schema, &serde_json::Value::Object(input.0.clone()))?;
             let config_mp = build_config_msgpack(&attrs, &input.0, false)?;
             let state_mp = self.p.read_datasource(datasource_type, config_mp).await?;
-            return Ok(state_from_msgpack(&state_mp)?);
+            let current_version = self.p.get_resource_schema_version(datasource_type);
+            return Ok(state_from_msgpack(&state_mp, current_version)?);
         }
         check_schema(&self.params_schemask(type_)?, &serde_json::Value::Object(input.0.clone()))?;
         let attrs = self.p.get_resource_schema(type_)?;
@@ -153,7 +171,8 @@ impl Provider {
         let plan = self.p.plan(type_, prior_mp.clone(), proposed_mp, config_mp.clone(), vec![]).await?;
         let new_state_mp =
             self.p.apply(type_, prior_mp, plan.planned_state, config_mp, plan.planned_private).await?;
-        return Ok(state_from_msgpack(&new_state_mp)?);
+        let current_version = self.p.get_resource_schema_version(type_);
+        return Ok(state_from_msgpack(&new_state_mp, current_version)?);
     }
 
     pub async fn modify(
@@ -162,7 +181,8 @@ impl Provider {
         state: ResourceState,
         params: Params,
     ) -> Result<ResourceState, anyhow::Error> {
-        check_schema(&self.state_schemask(resource_type)?, &state.0)?;
+        let state = self.maybe_upgrade_state(resource_type, state).await?;
+        check_schema(&self.state_schemask(resource_type)?, &state.state)?;
         check_schema(&self.params_schemask(resource_type)?, &serde_json::Value::Object(params.0.clone()))?;
         let attrs = self.p.get_resource_schema(resource_type)?;
         let prior_mp = state_to_msgpack(&state)?;
@@ -177,7 +197,7 @@ impl Provider {
         // Build a merged map: prior optional/required values + new_values override.
         // Computed-only attrs are intentionally omitted so they become unknown.
         let mut merged = serde_json::Map::new();
-        if let serde_json::Value::Object(prior_map) = state.0 {
+        if let serde_json::Value::Object(prior_map) = state.state {
             for (k, v) in prior_map {
                 if !pure_computed_field_names.contains(k.as_str()) {
                     merged.insert(k.clone(), v.clone());
@@ -200,11 +220,13 @@ impl Provider {
         }
         let new_state_mp =
             self.p.apply(resource_type, prior_mp, plan.planned_state, config_mp, plan.planned_private).await?;
-        return Ok(state_from_msgpack(&new_state_mp)?);
+        let current_version = self.p.get_resource_schema_version(resource_type);
+        return Ok(state_from_msgpack(&new_state_mp, current_version)?);
     }
 
     pub async fn delete(&mut self, resource_type: &str, state: ResourceState) -> Result<(), anyhow::Error> {
-        check_schema(&self.state_schemask(resource_type)?, &state.0)?;
+        let state = self.maybe_upgrade_state(resource_type, state).await?;
+        check_schema(&self.state_schemask(resource_type)?, &state.state)?;
         let prior_mp = state_to_msgpack(&state)?;
         let null_mp = null_msgpack();
         let plan = self.p.plan(&resource_type, prior_mp.clone(), null_mp.clone(), null_mp.clone(), vec![]).await?;
@@ -283,21 +305,22 @@ fn attrs_to_schemask_record(attrs: &[SchemaAttr], include_computed_only: bool) -
 
 fn state_to_msgpack(state: &ResourceState) -> Result<Vec<u8>, anyhow::Error> {
     let mut buf = Vec::new();
-    json_to_msgpack(&state.0, &mut buf)?;
+    json_to_msgpack(&state.state, &mut buf)?;
     Ok(buf)
 }
 
-fn state_from_msgpack(new_state_mp: &[u8]) -> Result<ResourceState, anyhow::Error> {
+fn state_from_msgpack(new_state_mp: &[u8], schema_version: i64) -> Result<ResourceState, anyhow::Error> {
     if new_state_mp.is_empty() {
-        return Ok(ResourceState(serde_json::Value::Null));
+        return Ok(ResourceState { state: serde_json::Value::Null, schema_version });
     }
     let mut rd = &new_state_mp[..];
     return Ok(
-        ResourceState(
-            msgpack_to_json(
+        ResourceState {
+            state: msgpack_to_json(
                 rmpv::decode::read_value(&mut rd).context("Error decoding resource state")?,
             ).context("Error converting resource state messagepack to json")?,
-        ),
+            schema_version,
+        },
     );
 }
 
@@ -381,7 +404,7 @@ mod tests {
             )
             .await?;
 
-        assert_eq!(state.0["content"], "datasource content");
+        assert_eq!(state.state["content"], "datasource content");
         return Ok(());
     }
 

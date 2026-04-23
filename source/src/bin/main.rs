@@ -60,6 +60,19 @@ struct ImportCommand {
 }
 
 #[derive(Aargvark)]
+struct ProviderSchemaskCommand {
+    provider: PathBuf,
+    provider_params: Option<AargvarkJson<Params>>,
+}
+
+#[derive(Aargvark)]
+struct SchemaskCommand {
+    provider: PathBuf,
+    provider_params: Option<AargvarkJson<Params>>,
+    resource_type: String,
+}
+
+#[derive(Aargvark)]
 enum Command {
     List(ListCommand),
     Create(CreateCommand),
@@ -67,6 +80,8 @@ enum Command {
     Delete(DeleteCommand),
     Refresh(RefreshCommand),
     Import(ImportCommand),
+    ProviderSchemask(ProviderSchemaskCommand),
+    Schemask(SchemaskCommand),
 }
 
 #[tokio::main]
@@ -129,6 +144,26 @@ async fn main() -> Result<(), anyhow::Error> {
                     &p.import(&c.resource_type, &c.id).await?
                 ).unwrap()
             );
+        },
+        Command::ProviderSchemask(c) => {
+            let p =
+                ExTerra::new()?
+                    .provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default())
+                    .await?;
+            println!("{}", serde_json::to_string_pretty(&schemask::Schemask::V1(p.provider_schemask()?)).unwrap());
+        },
+        Command::Schemask(c) => {
+            let p =
+                ExTerra::new()?
+                    .provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default())
+                    .await?;
+            let mut bindings = std::collections::HashMap::new();
+            bindings.extend(p.params_schemask(&c.resource_type)?.bindings);
+            bindings.extend(p.state_schemask(&c.resource_type)?.bindings);
+            println!("{}", serde_json::to_string_pretty(&schemask::Schemask::V1(schemask::v1::Schemask {
+                bindings,
+                default: None,
+            })).unwrap());
         },
     }
     return Ok(());

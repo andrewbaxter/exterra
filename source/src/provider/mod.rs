@@ -77,6 +77,13 @@ impl v_::ProviderInnerImpl for ProviderInner {
         }
     }
 
+    fn get_provider_schema_attrs(&self) -> Vec<crate::encoding::SchemaAttr> {
+        match self {
+            ProviderInner::V5(v) => v.get_provider_schema_attrs(),
+            ProviderInner::V6(v) => v.get_provider_schema_attrs(),
+        }
+    }
+
     fn get_resource_schema(
         &self,
         type_: &str,

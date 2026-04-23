@@ -21,6 +21,7 @@ pub(crate) struct PlanResult {
 
 pub(crate) trait ProviderInnerImpl {
     fn list_resource_types(&self) -> Vec<String>;
+    fn get_provider_schema_attrs(&self) -> Vec<SchemaAttr>;
     fn get_resource_schema(&self, type_: &str) -> Result<Vec<SchemaAttr>, anyhow::Error>;
     fn get_datasource_schema(&self, type_: &str) -> Result<Vec<SchemaAttr>, anyhow::Error>;
     async fn read_datasource(

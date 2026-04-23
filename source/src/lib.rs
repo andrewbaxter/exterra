@@ -1,6 +1,7 @@
 use {
     crate::{
         encoding::{
+            SchemaAttr,
             build_config_msgpack,
             json_to_msgpack,
             msgpack_to_json,
@@ -15,11 +16,17 @@ use {
         },
     },
     anyhow::Context,
+    schemask::{
+        Maskoid,
+        MaskoidField,
+    },
+    schemask::v1::Schemask,
     serde::{
         Deserialize,
         Serialize,
     },
     std::{
+        collections::HashMap,
         path::Path,
         sync::Arc,
     },
@@ -28,10 +35,10 @@ use {
 mod encoding;
 mod provider;
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct Params(pub serde_json::Map<String, serde_json::Value>);
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ResourceState(pub serde_json::Value);
 
 #[derive(Clone)]
@@ -62,16 +69,56 @@ impl ExTerra {
     }
 
     pub async fn provider(&self, binary: &Path, config: Params) -> Result<Provider, anyhow::Error> {
-        return Ok(Provider { p: provider::new(&self.provider_shared, binary, config.0).await? });
+        let config_json = serde_json::Value::Object(config.0.clone());
+        let provider = Provider { p: provider::new(&self.provider_shared, binary, config.0).await? };
+        let schema = provider.provider_schemask()?;
+        check_schema(&schema, &config_json)?;
+        return Ok(provider);
     }
+}
+
+fn check_schema(schema: &Schemask, data: &serde_json::Value) -> Result<(), anyhow::Error> {
+    schemask::validate(&schemask::Schemask::V1(schema.clone()), None, data)
+        .map_err(|e| anyhow::anyhow!("schema validation failed: {}", e))
 }
 
 impl Provider {
     pub fn list_resource_types(&self) -> Vec<String> {
-        self.p.list_resource_types()
+        return self.p.list_resource_types();
+    }
+
+    pub fn provider_schemask(&self) -> Result<Schemask, anyhow::Error> {
+        let attrs = self.p.get_provider_schema_attrs();
+        let mut bindings = HashMap::new();
+        bindings.insert("Params".to_string(), attrs_to_schemask_record(&attrs, false)?);
+        return Ok(Schemask {
+            bindings: bindings,
+            default: Some("Params".to_string()),
+        });
+    }
+
+    pub fn params_schemask(&self, resource_type: &str) -> Result<Schemask, anyhow::Error> {
+        let attrs = self.p.get_resource_schema(resource_type)?;
+        let mut bindings = HashMap::new();
+        bindings.insert("Params".to_string(), attrs_to_schemask_record(&attrs, false)?);
+        return Ok(Schemask {
+            bindings: bindings,
+            default: Some("Params".to_string()),
+        });
+    }
+
+    pub fn state_schemask(&self, resource_type: &str) -> Result<Schemask, anyhow::Error> {
+        let attrs = self.p.get_resource_schema(resource_type)?;
+        let mut bindings = HashMap::new();
+        bindings.insert("State".to_string(), attrs_to_schemask_record(&attrs, true)?);
+        return Ok(Schemask {
+            bindings: bindings,
+            default: Some("State".to_string()),
+        });
     }
 
     pub async fn refresh(&mut self, resource_type: &str, state: ResourceState) -> Result<ResourceState, anyhow::Error> {
+        check_schema(&self.state_schemask(resource_type)?, &state.0)?;
         let current_mp = state_to_msgpack(&state)?;
         let new_mp = self.p.read(resource_type, current_mp, vec![]).await?;
         return Ok(state_from_msgpack(&new_mp)?);
@@ -85,10 +132,20 @@ impl Provider {
     pub async fn create(&mut self, type_: &str, input: Params) -> Result<ResourceState, anyhow::Error> {
         if let Some(datasource_type) = type_.strip_prefix("data.") {
             let attrs = self.p.get_datasource_schema(datasource_type)?;
+            let schema = {
+                let mut bindings = HashMap::new();
+                bindings.insert("Params".to_string(), attrs_to_schemask_record(&attrs, false)?);
+                Schemask {
+                    bindings,
+                    default: Some("Params".to_string()),
+                }
+            };
+            check_schema(&schema, &serde_json::Value::Object(input.0.clone()))?;
             let config_mp = build_config_msgpack(&attrs, &input.0, false)?;
             let state_mp = self.p.read_datasource(datasource_type, config_mp).await?;
             return Ok(state_from_msgpack(&state_mp)?);
         }
+        check_schema(&self.params_schemask(type_)?, &serde_json::Value::Object(input.0.clone()))?;
         let attrs = self.p.get_resource_schema(type_)?;
         let config_mp = build_config_msgpack(&attrs, &input.0, false)?;
         let proposed_mp = build_config_msgpack(&attrs, &input.0, true)?;
@@ -105,6 +162,8 @@ impl Provider {
         state: ResourceState,
         params: Params,
     ) -> Result<ResourceState, anyhow::Error> {
+        check_schema(&self.state_schemask(resource_type)?, &state.0)?;
+        check_schema(&self.params_schemask(resource_type)?, &serde_json::Value::Object(params.0.clone()))?;
         let attrs = self.p.get_resource_schema(resource_type)?;
         let prior_mp = state_to_msgpack(&state)?;
 
@@ -145,12 +204,81 @@ impl Provider {
     }
 
     pub async fn delete(&mut self, resource_type: &str, state: ResourceState) -> Result<(), anyhow::Error> {
+        check_schema(&self.state_schemask(resource_type)?, &state.0)?;
         let prior_mp = state_to_msgpack(&state)?;
         let null_mp = null_msgpack();
         let plan = self.p.plan(&resource_type, prior_mp.clone(), null_mp.clone(), null_mp.clone(), vec![]).await?;
         self.p.apply(&resource_type, prior_mp, plan.planned_state, null_mp, plan.planned_private).await?;
         return Ok(());
     }
+}
+
+fn cty_type_to_maskoid(type_json: &serde_json::Value) -> Result<Maskoid, anyhow::Error> {
+    match type_json {
+        serde_json::Value::String(s) => match s.as_str() {
+            "string" => return Ok(Maskoid::String),
+            "number" => return Ok(Maskoid::Float),
+            "bool" => return Ok(Maskoid::Bool),
+            "dynamic" => return Ok(Maskoid::Any),
+            other => return Err(anyhow::anyhow!("Unknown cty primitive type: {}", other)),
+        },
+        serde_json::Value::Array(arr) if arr.len() >= 2 => {
+            let kind = match &arr[0] {
+                serde_json::Value::String(s) => s.clone(),
+                _ => return Err(anyhow::anyhow!("cty collection type kind must be a string")),
+            };
+            match kind.as_str() {
+                "list" => return Ok(Maskoid::list(cty_type_to_maskoid(&arr[1])?)),
+                "set" => return Ok(Maskoid::set(cty_type_to_maskoid(&arr[1])?)),
+                "map" => return Ok(Maskoid::string_map(cty_type_to_maskoid(&arr[1])?)),
+                "tuple" => {
+                    let elems = match &arr[1] {
+                        serde_json::Value::Array(a) => a,
+                        _ => return Err(anyhow::anyhow!("cty tuple elements must be an array")),
+                    };
+                    let mut elements = Vec::new();
+                    for elem in elems {
+                        elements.push(MaskoidField::new(cty_type_to_maskoid(elem)?));
+                    }
+                    return Ok(Maskoid::tuple(elements));
+                },
+                "object" => {
+                    let obj = match &arr[1] {
+                        serde_json::Value::Object(o) => o,
+                        _ => return Err(anyhow::anyhow!("cty object fields must be an object")),
+                    };
+                    let mut fields = HashMap::new();
+                    for (key, type_val) in obj {
+                        fields.insert(key.clone(), MaskoidField::new(cty_type_to_maskoid(type_val)?));
+                    }
+                    return Ok(Maskoid::record(fields));
+                },
+                other => return Err(anyhow::anyhow!("Unknown cty collection type: {}", other)),
+            }
+        },
+        _ => return Err(anyhow::anyhow!("Invalid cty type JSON")),
+    }
+}
+
+fn attrs_to_schemask_record(attrs: &[SchemaAttr], include_computed_only: bool) -> Result<Maskoid, anyhow::Error> {
+    let mut fields = HashMap::new();
+    for attr in attrs {
+        let pure_computed = attr.computed && !attr.optional && !attr.required;
+        if !include_computed_only && pure_computed {
+            continue;
+        }
+        let inner = cty_type_to_maskoid(
+            &serde_json::from_slice(&attr.type_)
+                .with_context(|| format!("Error parsing cty type for attribute [{}]", attr.name))?,
+        ).with_context(|| format!("Error converting cty type for attribute [{}]", attr.name))?;
+        let maskoid = if attr.required && !attr.optional {
+            inner
+        } else {
+            Maskoid::option(inner)
+        };
+        fields.insert(attr.name.clone(), MaskoidField::new(maskoid));
+    }
+    return Ok(Maskoid::record(fields));
 }
 
 fn state_to_msgpack(state: &ResourceState) -> Result<Vec<u8>, anyhow::Error> {

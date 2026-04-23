@@ -48,14 +48,15 @@ fn check_diags(diags: &[proto::Diagnostic]) -> Result<(), anyhow::Error> {
 }
 
 fn block_attrs(block: Option<&proto::schema::Block>) -> Vec<SchemaAttr> {
-    block.map(|b| {
+    return block.map(|b| {
         b.attributes.iter().map(|a| SchemaAttr {
             name: a.name.clone(),
             required: a.required,
             optional: a.optional,
             computed: a.computed,
+            type_: a.r#type.clone(),
         }).collect()
-    }).unwrap_or_default()
+    }).unwrap_or_default();
 }
 
 pub(crate) struct ProviderInner {
@@ -99,7 +100,11 @@ impl ProviderInnerImpl for ProviderInner {
     fn list_resource_types(&self) -> Vec<String> {
         let mut types: Vec<String> = self.schema.resource_schemas.keys().cloned().collect();
         types.sort();
-        types
+        return types;
+    }
+
+    fn get_provider_schema_attrs(&self) -> Vec<SchemaAttr> {
+        return block_attrs(self.schema.provider.as_ref().and_then(|s| s.block.as_ref()));
     }
 
     fn get_resource_schema(&self, type_: &str) -> Result<Vec<SchemaAttr>, anyhow::Error> {

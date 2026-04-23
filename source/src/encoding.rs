@@ -129,4 +129,5 @@ pub struct SchemaAttr {
     pub required: bool,
     pub optional: bool,
     pub computed: bool,
+    pub type_: Vec<u8>,
 }

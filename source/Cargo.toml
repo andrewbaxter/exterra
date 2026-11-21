@@ -1,6 +1,6 @@
 [package]
 name = "exterra"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Run Terraform/OpenTofu providers directly, without Terraform"
 license = "ISC"

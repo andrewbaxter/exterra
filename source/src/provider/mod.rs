@@ -1,6 +1,9 @@
 use {
     crate::{
-        encoding::SchemaBlock,
+        encoding::{
+            SchemaBlock,
+            encode_block,
+        },
         provider::{
             v_::ProviderShared,
         },
@@ -296,9 +299,9 @@ pub async fn new(
                 _now: UnixTime,
             ) -> std::result::Result<ServerCertVerified, rustls::Error> {
                 if end_entity.as_ref() == self.expected_der.as_slice() {
-                    Ok(ServerCertVerified::assertion())
+                    return Ok(ServerCertVerified::assertion());
                 } else {
-                    Err(rustls::Error::General("server certificate pin mismatch".into()))
+                    return Err(rustls::Error::General("server certificate pin mismatch".into()));
                 }
             }
 
@@ -308,12 +311,12 @@ pub async fn new(
                 cert: &CertificateDer<'_>,
                 dss: &DigitallySignedStruct,
             ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-                rustls::crypto::verify_tls12_signature(
+                return rustls::crypto::verify_tls12_signature(
                     message,
                     cert,
                     dss,
                     &self.crypto.signature_verification_algorithms,
-                )
+                );
             }
 
             fn verify_tls13_signature(
@@ -322,16 +325,16 @@ pub async fn new(
                 cert: &CertificateDer<'_>,
                 dss: &DigitallySignedStruct,
             ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-                rustls::crypto::verify_tls13_signature(
+                return rustls::crypto::verify_tls13_signature(
                     message,
                     cert,
                     dss,
                     &self.crypto.signature_verification_algorithms,
-                )
+                );
             }
 
             fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-                self.crypto.signature_verification_algorithms.supported_schemes()
+                return self.crypto.signature_verification_algorithms.supported_schemes();
             }
         }
 
@@ -359,7 +362,7 @@ pub async fn new(
 
     impl<T: Unpin> hyper_util::client::legacy::connect::Connection for TlsIo<T> {
         fn connected(&self) -> hyper_util::client::legacy::connect::Connected {
-            hyper_util::client::legacy::connect::Connected::new()
+            return hyper_util::client::legacy::connect::Connected::new();
         }
     }
 
@@ -369,7 +372,7 @@ pub async fn new(
             cx: &mut Context<'_>,
             buf: &mut ReadBuf<'_>,
         ) -> Poll<std::io::Result<()>> {
-            Pin::new(&mut self.0).poll_read(cx, buf)
+            return Pin::new(&mut self.0).poll_read(cx, buf);
         }
     }
 
@@ -379,15 +382,15 @@ pub async fn new(
             cx: &mut Context<'_>,
             buf: &[u8],
         ) -> Poll<std::io::Result<usize>> {
-            Pin::new(&mut self.0).poll_write(cx, buf)
+            return Pin::new(&mut self.0).poll_write(cx, buf);
         }
 
         fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Pin::new(&mut self.0).poll_flush(cx)
+            return Pin::new(&mut self.0).poll_flush(cx);
         }
 
         fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Pin::new(&mut self.0).poll_shutdown(cx)
+            return Pin::new(&mut self.0).poll_shutdown(cx);
         }
     }
 
@@ -401,11 +404,11 @@ pub async fn new(
                         let connector = channel_connector.clone();
                         let sn = server_name.clone();
                         let host = host.clone();
-                        async move {
+                        return async move {
                             let stream = TcpStream::connect((host.as_str(), port)).await?;
                             let tls = connector.connect(sn, stream).await?;
-                            Ok::<_, std::io::Error>(TokioIo::new(TlsIo(tls)))
-                        }
+                            return Ok::<_, std::io::Error>(TokioIo::new(TlsIo(tls)));
+                        };
                     }))
                     .await?;
             ch
@@ -416,27 +419,67 @@ pub async fn new(
                 let connector = channel_connector.clone();
                 let sn = server_name.clone();
                 let path = path.clone();
-                async move {
+                return async move {
                     let stream = UnixStream::connect(&path).await?;
                     let tls = connector.connect(sn, stream).await?;
-                    Ok::<_, std::io::Error>(TokioIo::new(TlsIo(tls)))
-                }
+                    return Ok::<_, std::io::Error>(TokioIo::new(TlsIo(tls)));
+                };
             })).await?;
             ch
         },
     };
     let child = child.0.take().expect("child is present until hand-off");
     match proto_version {
-        5 => return Ok(
-            ProviderInner::V5(
-                v5::ProviderInner::new(child, provider_config, channel, shared.terraform_version.clone()).await?,
-            ),
-        ),
-        6 => return Ok(
-            ProviderInner::V6(
-                v6::ProviderInner::new(child, provider_config, channel, shared.terraform_version.clone()).await?,
-            ),
-        ),
+        5 => {
+            let mut this = v5::ProviderInner {
+                c: v5::proto::provider_client::ProviderClient::new(channel),
+                schema: Default::default(),
+                process: child,
+            };
+            this.schema = this.c.get_schema(v5::proto::get_provider_schema::Request {}).await?.into_inner();
+            v5::check_diags(&this.schema.diagnostics)?;
+            let provider_block = v5::convert_block(this.schema.provider.as_ref().and_then(|s| s.block.as_ref()))?;
+            let mut provider_config_mp = Vec::new();
+            encode_block(
+                &provider_block.attrs,
+                &provider_block.blocks,
+                &provider_config,
+                false,
+                &mut provider_config_mp,
+            )?;
+            let resp = this.c.configure(v5::proto::configure::Request {
+                terraform_version: shared.terraform_version.clone(),
+                config: Some(v5::dv(provider_config_mp)),
+                ..Default::default()
+            }).await?.into_inner();
+            v5::check_diags(&resp.diagnostics)?;
+            return Ok(ProviderInner::V5(this));
+        },
+        6 => {
+            let mut this = v6::ProviderInner {
+                c: v6::proto::provider_client::ProviderClient::new(channel),
+                schema: Default::default(),
+                process: child,
+            };
+            this.schema = this.c.get_provider_schema(v6::proto::get_provider_schema::Request {}).await?.into_inner();
+            v6::check_diags(&this.schema.diagnostics)?;
+            let provider_block = v6::convert_block(this.schema.provider.as_ref().and_then(|s| s.block.as_ref()))?;
+            let mut provider_config_mp = Vec::new();
+            encode_block(
+                &provider_block.attrs,
+                &provider_block.blocks,
+                &provider_config,
+                false,
+                &mut provider_config_mp,
+            )?;
+            let resp = this.c.configure_provider(v6::proto::configure_provider::Request {
+                terraform_version: shared.terraform_version.clone(),
+                config: Some(v6::dv(provider_config_mp)),
+                ..Default::default()
+            }).await?.into_inner();
+            v6::check_diags(&resp.diagnostics)?;
+            return Ok(ProviderInner::V6(this));
+        },
         v => {
             return Err(anyhow::anyhow!("Unknown plugin protocol version {}", v));
         },

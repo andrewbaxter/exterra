@@ -1,0 +1,37 @@
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  rust_ai_lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@v31
+        with:
+          # rust-ai-lint links against rustc internals, so pin the toolchain it's built with
+          nix_path: nixpkgs=https://github.com/NixOS/nixpkgs/archive/f3a73bcf5d1c5b75a66cf35a48957e30d41d647a.tar.gz
+      - name: Install rust-ai-lint
+        run: |
+          nix-build --out-link "$RUNNER_TEMP/rust-ai-lint" https://github.com/andrewbaxter/rust-ai-lint/archive/1f39a7fa9c92956f88403aa838518c6a88b6e631.tar.gz
+          echo "$RUNNER_TEMP/rust-ai-lint/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: source/target/rust-ai-lint
+          key: rust-ai-lint-${{ hashFiles('source/Cargo.lock') }}
+          restore-keys: rust-ai-lint-
+      - name: Lint
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -eu
+          if ! git rev-parse --verify --quiet "$BASE^{commit}" > /dev/null; then
+            BASE=HEAD~1
+          fi
+          rust-ai-lint --against "$BASE"
+          # The linter fixes what it can in place; any such fix means the change wasn't linted
+          git diff --exit-code

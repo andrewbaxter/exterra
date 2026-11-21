@@ -7,7 +7,6 @@ use {
             SchemaBlock,
             SchemaNestedBlock,
             SchemaNesting,
-            encode_block,
         },
         provider::v_::{
             PlanResult,
@@ -23,12 +22,10 @@ use {
 };
 
 pub mod proto {
-    #![allow(dead_code)]
-
     tonic::include_proto!("tfplugin5");
 }
 
-fn dv(mp: Vec<u8>) -> proto::DynamicValue {
+pub(super) fn dv(mp: Vec<u8>) -> proto::DynamicValue {
     return proto::DynamicValue {
         msgpack: mp,
         json: vec![],
@@ -43,7 +40,7 @@ fn extract(dv: Option<proto::DynamicValue>) -> Vec<u8> {
     }).unwrap_or_default();
 }
 
-fn check_diags(diags: &[proto::Diagnostic]) -> Result<(), anyhow::Error> {
+pub(super) fn check_diags(diags: &[proto::Diagnostic]) -> Result<(), anyhow::Error> {
     let mut errs = vec![];
     for d in diags {
         if d.severity == proto::diagnostic::Severity::Error as i32 {
@@ -63,28 +60,7 @@ fn check_diags(diags: &[proto::Diagnostic]) -> Result<(), anyhow::Error> {
     return Ok(());
 }
 
-fn convert_attrs(attrs: &[proto::schema::Attribute]) -> Result<Vec<SchemaAttr>, anyhow::Error> {
-    let mut out = vec![];
-    for a in attrs {
-        // Protocol 5 has no nested attributes; every attribute is a plain cty type.
-        let type_ = SchemaAttrType::Cty(SchemaAttrTypeCty { type_json: a.r#type.clone() });
-        out.push(SchemaAttr {
-            name: a.name.clone(),
-            required: a.required,
-            optional: a.optional,
-            computed: a.computed,
-            sensitive: a.sensitive,
-            write_only: a.write_only,
-            deprecated: a.deprecated,
-            deprecation_message: a.deprecation_message.clone(),
-            description: a.description.clone(),
-            type_: type_,
-        });
-    }
-    return Ok(out);
-}
-
-fn convert_block(block: Option<&proto::schema::Block>) -> Result<SchemaBlock, anyhow::Error> {
+pub(super) fn convert_block(block: Option<&proto::schema::Block>) -> Result<SchemaBlock, anyhow::Error> {
     let Some(block) = block else {
         return Ok(SchemaBlock::default());
     };
@@ -110,8 +86,25 @@ fn convert_block(block: Option<&proto::schema::Block>) -> Result<SchemaBlock, an
             block: convert_block(b.block.as_ref())?,
         });
     }
+    let mut attrs = vec![];
+    for a in &block.attributes {
+        // Protocol 5 has no nested attributes; every attribute is a plain cty type.
+        let type_ = SchemaAttrType::Cty(SchemaAttrTypeCty { type_json: a.r#type.clone() });
+        attrs.push(SchemaAttr {
+            name: a.name.clone(),
+            required: a.required,
+            optional: a.optional,
+            computed: a.computed,
+            sensitive: a.sensitive,
+            write_only: a.write_only,
+            deprecated: a.deprecated,
+            deprecation_message: a.deprecation_message.clone(),
+            description: a.description.clone(),
+            type_: type_,
+        });
+    }
     return Ok(SchemaBlock {
-        attrs: convert_attrs(&block.attributes)?,
+        attrs: attrs,
         blocks: blocks,
         deprecated: block.deprecated,
         deprecation_message: block.deprecation_message.clone(),
@@ -120,45 +113,12 @@ fn convert_block(block: Option<&proto::schema::Block>) -> Result<SchemaBlock, an
 }
 
 pub(crate) struct ProviderInner {
-    c: proto::provider_client::ProviderClient<Channel>,
-    schema: proto::get_provider_schema::Response,
-    process: Child,
+    pub(super) c: proto::provider_client::ProviderClient<Channel>,
+    pub(super) schema: proto::get_provider_schema::Response,
+    pub(super) process: Child,
 }
 
 impl ProviderInner {
-    pub(crate) async fn new(
-        process: Child,
-        provider_config: serde_json::Map<String, serde_json::Value>,
-        channel: Channel,
-        terraform_version: String,
-    ) -> Result<Self, anyhow::Error> {
-        // Build `Self` first so that if any of the setup RPCs fail the provider process
-        // is still killed by `Drop`.
-        let mut this = Self {
-            c: proto::provider_client::ProviderClient::new(channel),
-            schema: Default::default(),
-            process: process,
-        };
-        this.schema = this.c.get_schema(proto::get_provider_schema::Request {}).await?.into_inner();
-        check_diags(&this.schema.diagnostics)?;
-        let provider_block = convert_block(this.schema.provider.as_ref().and_then(|s| s.block.as_ref()))?;
-        let mut provider_config_mp = Vec::new();
-        encode_block(
-            &provider_block.attrs,
-            &provider_block.blocks,
-            &provider_config,
-            false,
-            &mut provider_config_mp,
-        )?;
-        let resp = this.c.configure(proto::configure::Request {
-            terraform_version: terraform_version,
-            config: Some(dv(provider_config_mp)),
-            ..Default::default()
-        }).await?.into_inner();
-        check_diags(&resp.diagnostics)?;
-        return Ok(this);
-    }
-
     fn resource_schema(&self, type_: &str) -> Result<&proto::Schema, anyhow::Error> {
         return self
             .schema

@@ -2,6 +2,15 @@
 name = "exterra"
 version = "0.1.0"
 edition = "2024"
+description = "Run Terraform/OpenTofu providers directly, without Terraform"
+license = "ISC"
+repository = "https://github.com/andrewbaxter/exterra"
+include = [
+    "src/**/*.rs",
+    "build.rs",
+    "terraform-plugin-go/tfprotov5/internal/tfplugin5/tfplugin5.proto",
+    "terraform-plugin-go/tfprotov6/internal/tfplugin6/tfplugin6.proto",
+]
 
 [lib]
 doctest = false

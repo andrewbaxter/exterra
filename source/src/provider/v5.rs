@@ -2,11 +2,17 @@ use {
     crate::{
         encoding::{
             SchemaAttr,
-            build_config_msgpack,
+            SchemaAttrType,
+            SchemaAttrTypeCty,
+            SchemaBlock,
+            SchemaNestedBlock,
+            SchemaNesting,
+            encode_block,
         },
         provider::v_::{
-            ProviderInnerImpl,
             PlanResult,
+            ProviderInnerImpl,
+            StateResult,
         },
     },
     std::{
@@ -23,22 +29,29 @@ pub mod proto {
 }
 
 fn dv(mp: Vec<u8>) -> proto::DynamicValue {
-    proto::DynamicValue {
+    return proto::DynamicValue {
         msgpack: mp,
         json: vec![],
-    }
+    };
 }
 
 fn extract(dv: Option<proto::DynamicValue>) -> Vec<u8> {
-    dv.map(|d| if !d.msgpack.is_empty() {
+    return dv.map(|d| if !d.msgpack.is_empty() {
         d.msgpack
     } else {
         d.json
-    }).unwrap_or_default()
+    }).unwrap_or_default();
 }
 
 fn check_diags(diags: &[proto::Diagnostic]) -> Result<(), anyhow::Error> {
-    let errs: Vec<_> = diags.iter().filter(|d| d.severity == proto::diagnostic::Severity::Error as i32).collect();
+    let mut errs = vec![];
+    for d in diags {
+        if d.severity == proto::diagnostic::Severity::Error as i32 {
+            errs.push(d);
+        } else {
+            eprintln!("Provider warning: {}: {}", d.summary, d.detail);
+        }
+    }
     if !errs.is_empty() {
         return Err(
             anyhow::anyhow!(
@@ -50,52 +63,121 @@ fn check_diags(diags: &[proto::Diagnostic]) -> Result<(), anyhow::Error> {
     return Ok(());
 }
 
-fn block_attrs(block: Option<&proto::schema::Block>) -> Vec<SchemaAttr> {
-    return block.map(|b| {
-        b.attributes.iter().map(|a| SchemaAttr {
+fn convert_attrs(attrs: &[proto::schema::Attribute]) -> Result<Vec<SchemaAttr>, anyhow::Error> {
+    let mut out = vec![];
+    for a in attrs {
+        // Protocol 5 has no nested attributes; every attribute is a plain cty type.
+        let type_ = SchemaAttrType::Cty(SchemaAttrTypeCty { type_json: a.r#type.clone() });
+        out.push(SchemaAttr {
             name: a.name.clone(),
             required: a.required,
             optional: a.optional,
             computed: a.computed,
-            type_: a.r#type.clone(),
-        }).collect()
-    }).unwrap_or_default();
+            sensitive: a.sensitive,
+            write_only: a.write_only,
+            deprecated: a.deprecated,
+            deprecation_message: a.deprecation_message.clone(),
+            description: a.description.clone(),
+            type_: type_,
+        });
+    }
+    return Ok(out);
+}
+
+fn convert_block(block: Option<&proto::schema::Block>) -> Result<SchemaBlock, anyhow::Error> {
+    let Some(block) = block else {
+        return Ok(SchemaBlock::default());
+    };
+    let mut blocks = vec![];
+    for b in &block.block_types {
+        let nesting = match proto::schema::nested_block::NestingMode::try_from(b.nesting) {
+            Ok(proto::schema::nested_block::NestingMode::Single) => SchemaNesting::Single,
+            Ok(proto::schema::nested_block::NestingMode::List) => SchemaNesting::List,
+            Ok(proto::schema::nested_block::NestingMode::Set) => SchemaNesting::Set,
+            Ok(proto::schema::nested_block::NestingMode::Map) => SchemaNesting::Map,
+            Ok(proto::schema::nested_block::NestingMode::Group) => SchemaNesting::Group,
+            _ => {
+                return Err(
+                    anyhow::anyhow!("Nested block [{}] has unsupported nesting mode {}", b.type_name, b.nesting),
+                );
+            },
+        };
+        blocks.push(SchemaNestedBlock {
+            name: b.type_name.clone(),
+            nesting: nesting,
+            min_items: b.min_items,
+            max_items: b.max_items,
+            block: convert_block(b.block.as_ref())?,
+        });
+    }
+    return Ok(SchemaBlock {
+        attrs: convert_attrs(&block.attributes)?,
+        blocks: blocks,
+        deprecated: block.deprecated,
+        deprecation_message: block.deprecation_message.clone(),
+        description: block.description.clone(),
+    });
 }
 
 pub(crate) struct ProviderInner {
     c: proto::provider_client::ProviderClient<Channel>,
     schema: proto::get_provider_schema::Response,
-    _process: Child,
+    process: Child,
 }
 
 impl ProviderInner {
     pub(crate) async fn new(
-        _process: Child,
+        process: Child,
         provider_config: serde_json::Map<String, serde_json::Value>,
         channel: Channel,
+        terraform_version: String,
     ) -> Result<Self, anyhow::Error> {
-        let mut c = proto::provider_client::ProviderClient::new(channel);
-        let schema = c.get_schema(proto::get_provider_schema::Request {}).await?.into_inner();
-        check_diags(&schema.diagnostics)?;
-        let attrs = schema.provider.as_ref().map(|s| block_attrs(s.block.as_ref()));
-        let provider_config_mp = if provider_config.is_empty() {
-            let mut buf = Vec::new();
-            rmp::encode::write_map_len(&mut buf, 0)?;
-            buf
-        } else {
-            build_config_msgpack(&attrs.unwrap_or_default(), &provider_config, false)?
+        // Build `Self` first so that if any of the setup RPCs fail the provider process
+        // is still killed by `Drop`.
+        let mut this = Self {
+            c: proto::provider_client::ProviderClient::new(channel),
+            schema: Default::default(),
+            process: process,
         };
-        let resp = c.configure(proto::configure::Request {
-            terraform_version: "1.0.0".into(),
+        this.schema = this.c.get_schema(proto::get_provider_schema::Request {}).await?.into_inner();
+        check_diags(&this.schema.diagnostics)?;
+        let provider_block = convert_block(this.schema.provider.as_ref().and_then(|s| s.block.as_ref()))?;
+        let mut provider_config_mp = Vec::new();
+        encode_block(
+            &provider_block.attrs,
+            &provider_block.blocks,
+            &provider_config,
+            false,
+            &mut provider_config_mp,
+        )?;
+        let resp = this.c.configure(proto::configure::Request {
+            terraform_version: terraform_version,
             config: Some(dv(provider_config_mp)),
             ..Default::default()
         }).await?.into_inner();
         check_diags(&resp.diagnostics)?;
-        return Ok(Self {
-            c: c,
-            schema: schema,
-            _process: _process,
-        });
+        return Ok(this);
+    }
+
+    fn resource_schema(&self, type_: &str) -> Result<&proto::Schema, anyhow::Error> {
+        return self
+            .schema
+            .resource_schemas
+            .get(type_)
+            .ok_or_else(|| anyhow::anyhow!("Provider has no schema for resource [{}], is the name correct?", type_));
+    }
+}
+
+impl Drop for ProviderInner {
+    fn drop(&mut self) {
+        // The provider has no reason to exit on its own once the gRPC connection goes
+        // away, so without this every run leaves a provider process behind.
+        if let Err(e) = self.process.kill() {
+            eprintln!("Error killing provider process: {}", e);
+        }
+        if let Err(e) = self.process.wait() {
+            eprintln!("Error waiting for provider process to exit: {}", e);
+        }
     }
 }
 
@@ -106,57 +188,46 @@ impl ProviderInnerImpl for ProviderInner {
         return types;
     }
 
-    fn get_provider_schema_attrs(&self) -> Vec<SchemaAttr> {
-        return block_attrs(self.schema.provider.as_ref().and_then(|s| s.block.as_ref()));
+    fn process_id(&self) -> u32 {
+        return self.process.id();
     }
 
-    fn get_resource_schema(&self, type_: &str) -> Result<Vec<SchemaAttr>, anyhow::Error> {
-        return Ok(
-            block_attrs(
-                self
-                    .schema
-                    .resource_schemas
-                    .get(type_)
-                    .ok_or_else(
-                        || anyhow::anyhow!("Provider has no schema for resource [{}], is the name correct?", type_),
-                    )?
-                    .block
-                    .as_ref(),
-            ),
+    fn get_provider_schema(&self) -> SchemaBlock {
+        match convert_block(self.schema.provider.as_ref().and_then(|s| s.block.as_ref())) {
+            Ok(b) => return b,
+            Err(e) => {
+                // Already validated in `new`, so this cannot fail; log in case that changes.
+                eprintln!("Error converting provider schema: {}", e);
+                return SchemaBlock::default();
+            },
+        }
+    }
+
+    fn get_resource_schema(&self, type_: &str) -> Result<SchemaBlock, anyhow::Error> {
+        return convert_block(self.resource_schema(type_)?.block.as_ref());
+    }
+
+    fn get_datasource_schema(&self, type_: &str) -> Result<SchemaBlock, anyhow::Error> {
+        return convert_block(
+            self
+                .schema
+                .data_source_schemas
+                .get(type_)
+                .ok_or_else(
+                    || anyhow::anyhow!("Provider has no schema for datasource [{}], is the name correct?", type_),
+                )?
+                .block
+                .as_ref(),
         );
     }
 
-    fn get_datasource_schema(&self, type_: &str) -> Result<Vec<SchemaAttr>, anyhow::Error> {
-        return Ok(
-            block_attrs(
-                self
-                    .schema
-                    .data_source_schemas
-                    .get(type_)
-                    .ok_or_else(
-                        || anyhow::anyhow!("Provider has no schema for datasource [{}], is the name correct?", type_),
-                    )?
-                    .block
-                    .as_ref(),
-            ),
-        );
+    fn get_resource_schema_version(&self, type_: &str) -> Result<i64, anyhow::Error> {
+        // `Schema.version` is what Terraform compares against stored state;
+        // `Schema.Block.version` is a vestigial duplicate the SDKs leave at zero.
+        return Ok(self.resource_schema(type_)?.version);
     }
 
-    fn get_resource_schema_version(&self, type_: &str) -> i64 {
-        return self
-            .schema
-            .resource_schemas
-            .get(type_)
-            .and_then(|s| s.block.as_ref())
-            .map(|b| b.version)
-            .unwrap_or(0);
-    }
-
-    async fn read_datasource(
-        &mut self,
-        type_: &str,
-        config: Vec<u8>,
-    ) -> Result<Vec<u8>, anyhow::Error> {
+    async fn read_datasource(&mut self, type_: &str, config: Vec<u8>) -> Result<Vec<u8>, anyhow::Error> {
         let resp = self.c.read_data_source(proto::read_data_source::Request {
             type_name: type_.into(),
             config: Some(dv(config)),
@@ -171,31 +242,39 @@ impl ProviderInnerImpl for ProviderInner {
         resource_type: &str,
         current_state: Vec<u8>,
         private: Vec<u8>,
-    ) -> Result<Vec<u8>, anyhow::Error> {
+    ) -> Result<StateResult, anyhow::Error> {
         let resp = self.c.read_resource(proto::read_resource::Request {
             type_name: resource_type.into(),
             current_state: Some(dv(current_state)),
-            private,
+            private: private,
             ..Default::default()
         }).await?.into_inner();
         check_diags(&resp.diagnostics)?;
-        return Ok(extract(resp.new_state));
+        return Ok(StateResult {
+            state: extract(resp.new_state),
+            private: resp.private,
+        });
     }
 
-    async fn import(
-        &mut self,
-        resource_type: &str,
-        id: &str,
-    ) -> Result<Vec<u8>, anyhow::Error> {
+    async fn import(&mut self, resource_type: &str, id: &str) -> Result<StateResult, anyhow::Error> {
         let resp = self.c.import_resource_state(proto::import_resource_state::Request {
             type_name: resource_type.into(),
             id: id.into(),
             ..Default::default()
         }).await?.into_inner();
         check_diags(&resp.diagnostics)?;
-        let imported = resp.imported_resources.into_iter().next()
-            .ok_or_else(|| anyhow::anyhow!("Provider returned no imported resources for [{}] id [{}]", resource_type, id))?;
-        return Ok(extract(imported.state));
+        let imported =
+            resp
+                .imported_resources
+                .into_iter()
+                .next()
+                .ok_or_else(
+                    || anyhow::anyhow!("Provider returned no imported resources for [{}] id [{}]", resource_type, id),
+                )?;
+        return Ok(StateResult {
+            state: extract(imported.state),
+            private: imported.private,
+        });
     }
 
     async fn plan(
@@ -211,7 +290,7 @@ impl ProviderInnerImpl for ProviderInner {
             prior_state: Some(dv(prior_state)),
             proposed_new_state: Some(dv(proposed_new_state)),
             config: Some(dv(config)),
-            prior_private,
+            prior_private: prior_private,
             ..Default::default()
         }).await?.into_inner();
         check_diags(&resp.diagnostics)?;
@@ -229,17 +308,20 @@ impl ProviderInnerImpl for ProviderInner {
         planned_state: Vec<u8>,
         config: Vec<u8>,
         planned_private: Vec<u8>,
-    ) -> Result<Vec<u8>, anyhow::Error> {
+    ) -> Result<StateResult, anyhow::Error> {
         let resp = self.c.apply_resource_change(proto::apply_resource_change::Request {
             type_name: resource_type.into(),
             prior_state: Some(dv(prior_state)),
             planned_state: Some(dv(planned_state)),
             config: Some(dv(config)),
-            planned_private,
+            planned_private: planned_private,
             ..Default::default()
         }).await?.into_inner();
         check_diags(&resp.diagnostics)?;
-        return Ok(extract(resp.new_state));
+        return Ok(StateResult {
+            state: extract(resp.new_state),
+            private: resp.private,
+        });
     }
 
     async fn upgrade_resource_state(
@@ -250,7 +332,7 @@ impl ProviderInnerImpl for ProviderInner {
     ) -> Result<Vec<u8>, anyhow::Error> {
         let resp = self.c.upgrade_resource_state(proto::upgrade_resource_state::Request {
             type_name: resource_type.into(),
-            version,
+            version: version,
             raw_state: Some(proto::RawState {
                 json: raw_state_json,
                 flatmap: HashMap::new(),

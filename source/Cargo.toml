@@ -24,7 +24,7 @@ rustls = { version = "0.23", features = ["aws-lc-rs"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 tokio-stream = "0.1"
 tower = "0.4"
-schemask = "0.1"
+schemask = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

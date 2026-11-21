@@ -1,5 +1,6 @@
 use {
     crate::{
+        encoding::SchemaBlock,
         provider::{
             v_::ProviderShared,
         },
@@ -32,6 +33,7 @@ use {
         path::Path,
         pin::Pin,
         process::{
+            Child,
             Command,
             Stdio,
         },
@@ -72,42 +74,43 @@ pub enum ProviderInner {
 impl v_::ProviderInnerImpl for ProviderInner {
     fn list_resource_types(&self) -> Vec<String> {
         match self {
-            ProviderInner::V5(v) => v.list_resource_types(),
-            ProviderInner::V6(v) => v.list_resource_types(),
+            ProviderInner::V5(v) => return v.list_resource_types(),
+            ProviderInner::V6(v) => return v.list_resource_types(),
         }
     }
 
-    fn get_provider_schema_attrs(&self) -> Vec<crate::encoding::SchemaAttr> {
+    fn process_id(&self) -> u32 {
         match self {
-            ProviderInner::V5(v) => v.get_provider_schema_attrs(),
-            ProviderInner::V6(v) => v.get_provider_schema_attrs(),
+            ProviderInner::V5(v) => return v.process_id(),
+            ProviderInner::V6(v) => return v.process_id(),
         }
     }
 
-    fn get_resource_schema(
-        &self,
-        type_: &str,
-    ) -> std::result::Result<Vec<crate::encoding::SchemaAttr>, anyhow::Error> {
+    fn get_provider_schema(&self) -> SchemaBlock {
         match self {
-            ProviderInner::V5(v) => v.get_resource_schema(type_),
-            ProviderInner::V6(v) => v.get_resource_schema(type_),
+            ProviderInner::V5(v) => return v.get_provider_schema(),
+            ProviderInner::V6(v) => return v.get_provider_schema(),
         }
     }
 
-    fn get_datasource_schema(
-        &self,
-        type_: &str,
-    ) -> std::result::Result<Vec<crate::encoding::SchemaAttr>, anyhow::Error> {
+    fn get_resource_schema(&self, type_: &str) -> std::result::Result<SchemaBlock, anyhow::Error> {
         match self {
-            ProviderInner::V5(v) => v.get_datasource_schema(type_),
-            ProviderInner::V6(v) => v.get_datasource_schema(type_),
+            ProviderInner::V5(v) => return v.get_resource_schema(type_),
+            ProviderInner::V6(v) => return v.get_resource_schema(type_),
         }
     }
 
-    fn get_resource_schema_version(&self, type_: &str) -> i64 {
+    fn get_datasource_schema(&self, type_: &str) -> std::result::Result<SchemaBlock, anyhow::Error> {
         match self {
-            ProviderInner::V5(v) => v.get_resource_schema_version(type_),
-            ProviderInner::V6(v) => v.get_resource_schema_version(type_),
+            ProviderInner::V5(v) => return v.get_datasource_schema(type_),
+            ProviderInner::V6(v) => return v.get_datasource_schema(type_),
+        }
+    }
+
+    fn get_resource_schema_version(&self, type_: &str) -> std::result::Result<i64, anyhow::Error> {
+        match self {
+            ProviderInner::V5(v) => return v.get_resource_schema_version(type_),
+            ProviderInner::V6(v) => return v.get_resource_schema_version(type_),
         }
     }
 
@@ -117,8 +120,8 @@ impl v_::ProviderInnerImpl for ProviderInner {
         config: Vec<u8>,
     ) -> std::result::Result<Vec<u8>, anyhow::Error> {
         match &mut *self {
-            ProviderInner::V5(v) => v.read_datasource(type_, config).await,
-            ProviderInner::V6(v) => v.read_datasource(type_, config).await,
+            ProviderInner::V5(v) => return v.read_datasource(type_, config).await,
+            ProviderInner::V6(v) => return v.read_datasource(type_, config).await,
         }
     }
 
@@ -127,21 +130,17 @@ impl v_::ProviderInnerImpl for ProviderInner {
         resource_type: &str,
         current_state: Vec<u8>,
         private: Vec<u8>,
-    ) -> std::result::Result<Vec<u8>, anyhow::Error> {
+    ) -> std::result::Result<v_::StateResult, anyhow::Error> {
         match &mut *self {
-            ProviderInner::V5(v) => v.read(resource_type, current_state, private).await,
-            ProviderInner::V6(v) => v.read(resource_type, current_state, private).await,
+            ProviderInner::V5(v) => return v.read(resource_type, current_state, private).await,
+            ProviderInner::V6(v) => return v.read(resource_type, current_state, private).await,
         }
     }
 
-    async fn import(
-        &mut self,
-        resource_type: &str,
-        id: &str,
-    ) -> std::result::Result<Vec<u8>, anyhow::Error> {
+    async fn import(&mut self, resource_type: &str, id: &str) -> std::result::Result<v_::StateResult, anyhow::Error> {
         match &mut *self {
-            ProviderInner::V5(v) => v.import(resource_type, id).await,
-            ProviderInner::V6(v) => v.import(resource_type, id).await,
+            ProviderInner::V5(v) => return v.import(resource_type, id).await,
+            ProviderInner::V6(v) => return v.import(resource_type, id).await,
         }
     }
 
@@ -154,12 +153,12 @@ impl v_::ProviderInnerImpl for ProviderInner {
         prior_private: Vec<u8>,
     ) -> std::result::Result<v_::PlanResult, anyhow::Error> {
         match &mut *self {
-            ProviderInner::V5(v) => v
-                .plan(resource_type, prior_state, proposed_new_state, config, prior_private)
-                .await,
-            ProviderInner::V6(v) => v
-                .plan(resource_type, prior_state, proposed_new_state, config, prior_private)
-                .await,
+            ProviderInner::V5(v) => {
+                return v.plan(resource_type, prior_state, proposed_new_state, config, prior_private).await;
+            },
+            ProviderInner::V6(v) => {
+                return v.plan(resource_type, prior_state, proposed_new_state, config, prior_private).await;
+            },
         }
     }
 
@@ -170,14 +169,14 @@ impl v_::ProviderInnerImpl for ProviderInner {
         planned_state: Vec<u8>,
         config: Vec<u8>,
         planned_private: Vec<u8>,
-    ) -> std::result::Result<Vec<u8>, anyhow::Error> {
+    ) -> std::result::Result<v_::StateResult, anyhow::Error> {
         match &mut *self {
-            ProviderInner::V5(v) => v
-                .apply(resource_type, prior_state, planned_state, config, planned_private)
-                .await,
-            ProviderInner::V6(v) => v
-                .apply(resource_type, prior_state, planned_state, config, planned_private)
-                .await,
+            ProviderInner::V5(v) => {
+                return v.apply(resource_type, prior_state, planned_state, config, planned_private).await;
+            },
+            ProviderInner::V6(v) => {
+                return v.apply(resource_type, prior_state, planned_state, config, planned_private).await;
+            },
         }
     }
 
@@ -188,8 +187,26 @@ impl v_::ProviderInnerImpl for ProviderInner {
         raw_state_json: Vec<u8>,
     ) -> std::result::Result<Vec<u8>, anyhow::Error> {
         match &mut *self {
-            ProviderInner::V5(v) => v.upgrade_resource_state(resource_type, version, raw_state_json).await,
-            ProviderInner::V6(v) => v.upgrade_resource_state(resource_type, version, raw_state_json).await,
+            ProviderInner::V5(v) => return v.upgrade_resource_state(resource_type, version, raw_state_json).await,
+            ProviderInner::V6(v) => return v.upgrade_resource_state(resource_type, version, raw_state_json).await,
+        }
+    }
+}
+
+/// Owns the provider child between spawn and hand-off to a versioned
+/// `ProviderInner`, so a failure during the handshake or connection setup does not
+/// leak the process.
+struct SpawnedChild(Option<Child>);
+
+impl Drop for SpawnedChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            if let Err(e) = child.kill() {
+                eprintln!("Error killing provider process after failed startup: {}", e);
+            }
+            if let Err(e) = child.wait() {
+                eprintln!("Error waiting for provider process after failed startup: {}", e);
+            }
         }
     }
 }
@@ -201,22 +218,27 @@ pub async fn new(
 ) -> Result<ProviderInner, anyhow::Error> {
     // # Launch provider binary
     let mut child =
-        Command::new(binary)
-            // go-plugin magic cookie. terraform-plugin-go (used by the framework) uses a
-            // 64-char value; terraform-plugin-sdk v2 uses only the first 40 chars.
-            .env("TF_PLUGIN_MAGIC_COOKIE", "d602bf8f470bc67ca7faa0386276bbdd4330efaf76d1a219cb4d6991ca9872b2")
-            .env("PLUGIN_PROTOCOL_VERSIONS", "6,5")
-            .env("PLUGIN_CLIENT_CERT", &shared.own_pub_pem)
-            .env("PLUGIN_MIN_PORT", "10000")
-            .env("PLUGIN_MAX_PORT", "25000")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .with_context(|| format!("Error spawning provider binary [{}]", binary.display()))?;
+        SpawnedChild(
+            Some(
+                Command::new(binary)
+                    // go-plugin magic cookie. terraform-plugin-go (used by the framework) uses a
+                    // 64-char value; terraform-plugin-sdk v2 uses only the first 40 chars.
+                    .env("TF_PLUGIN_MAGIC_COOKIE", "d602bf8f470bc67ca7faa0386276bbdd4330efaf76d1a219cb4d6991ca9872b2")
+                    .env("PLUGIN_PROTOCOL_VERSIONS", "6,5")
+                    .env("PLUGIN_CLIENT_CERT", &shared.own_pub_pem)
+                    .env("PLUGIN_MIN_PORT", "10000")
+                    .env("PLUGIN_MAX_PORT", "25000")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .with_context(|| format!("Error spawning provider binary [{}]", binary.display()))?,
+            ),
+        );
 
     // # Get proto details from first line of child stdout
-    let child_stdout = child.stdout.take().expect("stdout was piped");
+    let child_stdout =
+        child.0.as_mut().expect("child is present until hand-off").stdout.take().expect("stdout was piped");
     let handshake_line = {
         let mut r = BufReader::new(child_stdout);
         let mut l = String::new();
@@ -330,8 +352,6 @@ pub async fn new(
         // gRPC requires HTTP/2; advertise h2 via ALPN so the TLS handshake negotiates the
         // right protocol.
         tls_cfg.alpn_protocols = vec![b"h2".to_vec()];
-
-        //. build_tls_config(&hs.server_cert_der, &shared.client_cert_der, &shared.client_key_der)?
         tls_cfg
     }));
 
@@ -405,9 +425,18 @@ pub async fn new(
             ch
         },
     };
+    let child = child.0.take().expect("child is present until hand-off");
     match proto_version {
-        5 => return Ok(ProviderInner::V5(v5::ProviderInner::new(child, provider_config, channel).await?)),
-        6 => return Ok(ProviderInner::V6(v6::ProviderInner::new(child, provider_config, channel).await?)),
+        5 => return Ok(
+            ProviderInner::V5(
+                v5::ProviderInner::new(child, provider_config, channel, shared.terraform_version.clone()).await?,
+            ),
+        ),
+        6 => return Ok(
+            ProviderInner::V6(
+                v6::ProviderInner::new(child, provider_config, channel, shared.terraform_version.clone()).await?,
+            ),
+        ),
         v => {
             return Err(anyhow::anyhow!("Unknown plugin protocol version {}", v));
         },

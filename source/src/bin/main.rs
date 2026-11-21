@@ -84,29 +84,28 @@ enum Command {
     Schemask(SchemaskCommand),
 }
 
+#[derive(Aargvark)]
+struct Args {
+    /// Host version reported to the provider (default `1.0.0`).
+    terraform_version: Option<String>,
+    command: Command,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    let command = vark::<Command>();
-    match command {
+    let args = vark::<Args>();
+    let et = ExTerra::new(args.terraform_version)?;
+    match args.command {
         Command::List(c) => {
-            let p =
-                ExTerra::new()?
-                    .provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default())
-                    .await?;
+            let p = et.provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default()).await?;
             println!("{}", serde_json::to_string_pretty(&p.list_resource_types()).unwrap());
         },
         Command::Create(c) => {
-            let mut p =
-                ExTerra::new()?
-                    .provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default())
-                    .await?;
+            let mut p = et.provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default()).await?;
             println!("{}", serde_json::to_string_pretty(&p.create(&c.resource_type, c.params.value).await?).unwrap());
         },
         Command::Modify(c) => {
-            let mut p =
-                ExTerra::new()?
-                    .provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default())
-                    .await?;
+            let mut p = et.provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default()).await?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(
@@ -115,53 +114,28 @@ async fn main() -> Result<(), anyhow::Error> {
             );
         },
         Command::Delete(c) => {
-            let mut p =
-                ExTerra::new()?
-                    .provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default())
-                    .await?;
+            let mut p = et.provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default()).await?;
             p.delete(&c.resource_type, c.state.value).await?;
         },
         Command::Refresh(c) => {
-            let mut p =
-                ExTerra::new()?
-                    .provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default())
-                    .await?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &p.refresh(&c.resource_type, c.state.value).await?
-                ).unwrap()
-            );
+            let mut p = et.provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default()).await?;
+            println!("{}", serde_json::to_string_pretty(&p.refresh(&c.resource_type, c.state.value).await?).unwrap());
         },
         Command::Import(c) => {
-            let mut p =
-                ExTerra::new()?
-                    .provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default())
-                    .await?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &p.import(&c.resource_type, &c.id).await?
-                ).unwrap()
-            );
+            let mut p = et.provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default()).await?;
+            println!("{}", serde_json::to_string_pretty(&p.import(&c.resource_type, &c.id).await?).unwrap());
         },
         Command::ProviderSchemask(c) => {
-            let p =
-                ExTerra::new()?
-                    .provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default())
-                    .await?;
+            let p = et.provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default()).await?;
             println!("{}", serde_json::to_string_pretty(&schemask::Schemask::V1(p.provider_schemask()?)).unwrap());
         },
         Command::Schemask(c) => {
-            let p =
-                ExTerra::new()?
-                    .provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default())
-                    .await?;
-            let mut bindings = std::collections::HashMap::new();
+            let p = et.provider(&c.provider, c.provider_params.map(|x| x.value).unwrap_or_default()).await?;
+            let mut bindings = std::collections::BTreeMap::new();
             bindings.extend(p.params_schemask(&c.resource_type)?.bindings);
             bindings.extend(p.state_schemask(&c.resource_type)?.bindings);
-            println!("{}", serde_json::to_string_pretty(&schemask::Schemask::V1(schemask::v1::Schemask {
-                bindings,
+            println!("{}", serde_json::to_string_pretty(&schemask::Schemask::V1(schemask::latest::SchemaskV1 {
+                bindings: bindings,
                 default: None,
             })).unwrap());
         },

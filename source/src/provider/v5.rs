@@ -148,6 +148,12 @@ impl ProviderInnerImpl for ProviderInner {
         return types;
     }
 
+    fn list_datasource_types(&self) -> Vec<String> {
+        let mut types: Vec<String> = self.schema.data_source_schemas.keys().cloned().collect();
+        types.sort();
+        return types;
+    }
+
     fn process_id(&self) -> u32 {
         return self.process.id();
     }
@@ -187,8 +193,8 @@ impl ProviderInnerImpl for ProviderInner {
         return Ok(self.resource_schema(type_)?.version);
     }
 
-    async fn read_datasource(&mut self, type_: &str, config: Vec<u8>) -> Result<Vec<u8>, anyhow::Error> {
-        let resp = self.c.read_data_source(proto::read_data_source::Request {
+    async fn read_datasource(&self, type_: &str, config: Vec<u8>) -> Result<Vec<u8>, anyhow::Error> {
+        let resp = self.c.clone().read_data_source(proto::read_data_source::Request {
             type_name: type_.into(),
             config: Some(dv(config)),
             ..Default::default()
@@ -198,12 +204,12 @@ impl ProviderInnerImpl for ProviderInner {
     }
 
     async fn read(
-        &mut self,
+        &self,
         resource_type: &str,
         current_state: Vec<u8>,
         private: Vec<u8>,
     ) -> Result<StateResult, anyhow::Error> {
-        let resp = self.c.read_resource(proto::read_resource::Request {
+        let resp = self.c.clone().read_resource(proto::read_resource::Request {
             type_name: resource_type.into(),
             current_state: Some(dv(current_state)),
             private: private,
@@ -216,8 +222,8 @@ impl ProviderInnerImpl for ProviderInner {
         });
     }
 
-    async fn import(&mut self, resource_type: &str, id: &str) -> Result<StateResult, anyhow::Error> {
-        let resp = self.c.import_resource_state(proto::import_resource_state::Request {
+    async fn import(&self, resource_type: &str, id: &str) -> Result<StateResult, anyhow::Error> {
+        let resp = self.c.clone().import_resource_state(proto::import_resource_state::Request {
             type_name: resource_type.into(),
             id: id.into(),
             ..Default::default()
@@ -238,14 +244,14 @@ impl ProviderInnerImpl for ProviderInner {
     }
 
     async fn plan(
-        &mut self,
+        &self,
         resource_type: &str,
         prior_state: Vec<u8>,
         proposed_new_state: Vec<u8>,
         config: Vec<u8>,
         prior_private: Vec<u8>,
     ) -> Result<PlanResult, anyhow::Error> {
-        let resp = self.c.plan_resource_change(proto::plan_resource_change::Request {
+        let resp = self.c.clone().plan_resource_change(proto::plan_resource_change::Request {
             type_name: resource_type.into(),
             prior_state: Some(dv(prior_state)),
             proposed_new_state: Some(dv(proposed_new_state)),
@@ -257,19 +263,24 @@ impl ProviderInnerImpl for ProviderInner {
         return Ok(PlanResult {
             planned_state: extract(resp.planned_state),
             planned_private: resp.planned_private,
-            requires_replace: !resp.requires_replace.is_empty(),
+            requires_replace: resp.requires_replace.iter().map(|p| p.steps.iter().filter_map(|s| match &s.selector {
+                Some(proto::attribute_path::step::Selector::AttributeName(n)) => Some(n.clone()),
+                Some(proto::attribute_path::step::Selector::ElementKeyString(k)) => Some(k.clone()),
+                Some(proto::attribute_path::step::Selector::ElementKeyInt(i)) => Some(i.to_string()),
+                None => None,
+            }).collect()).collect(),
         });
     }
 
     async fn apply(
-        &mut self,
+        &self,
         resource_type: &str,
         prior_state: Vec<u8>,
         planned_state: Vec<u8>,
         config: Vec<u8>,
         planned_private: Vec<u8>,
     ) -> Result<StateResult, anyhow::Error> {
-        let resp = self.c.apply_resource_change(proto::apply_resource_change::Request {
+        let resp = self.c.clone().apply_resource_change(proto::apply_resource_change::Request {
             type_name: resource_type.into(),
             prior_state: Some(dv(prior_state)),
             planned_state: Some(dv(planned_state)),
@@ -285,12 +296,12 @@ impl ProviderInnerImpl for ProviderInner {
     }
 
     async fn upgrade_resource_state(
-        &mut self,
+        &self,
         resource_type: &str,
         version: i64,
         raw_state_json: Vec<u8>,
     ) -> Result<Vec<u8>, anyhow::Error> {
-        let resp = self.c.upgrade_resource_state(proto::upgrade_resource_state::Request {
+        let resp = self.c.clone().upgrade_resource_state(proto::upgrade_resource_state::Request {
             type_name: resource_type.into(),
             version: version,
             raw_state: Some(proto::RawState {

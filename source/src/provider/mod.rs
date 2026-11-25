@@ -82,6 +82,13 @@ impl v_::ProviderInnerImpl for ProviderInner {
         }
     }
 
+    fn list_datasource_types(&self) -> Vec<String> {
+        match self {
+            ProviderInner::V5(v) => return v.list_datasource_types(),
+            ProviderInner::V6(v) => return v.list_datasource_types(),
+        }
+    }
+
     fn process_id(&self) -> u32 {
         match self {
             ProviderInner::V5(v) => return v.process_id(),
@@ -117,45 +124,41 @@ impl v_::ProviderInnerImpl for ProviderInner {
         }
     }
 
-    async fn read_datasource(
-        &mut self,
-        type_: &str,
-        config: Vec<u8>,
-    ) -> std::result::Result<Vec<u8>, anyhow::Error> {
-        match &mut *self {
+    async fn read_datasource(&self, type_: &str, config: Vec<u8>) -> std::result::Result<Vec<u8>, anyhow::Error> {
+        match self {
             ProviderInner::V5(v) => return v.read_datasource(type_, config).await,
             ProviderInner::V6(v) => return v.read_datasource(type_, config).await,
         }
     }
 
     async fn read(
-        &mut self,
+        &self,
         resource_type: &str,
         current_state: Vec<u8>,
         private: Vec<u8>,
     ) -> std::result::Result<v_::StateResult, anyhow::Error> {
-        match &mut *self {
+        match self {
             ProviderInner::V5(v) => return v.read(resource_type, current_state, private).await,
             ProviderInner::V6(v) => return v.read(resource_type, current_state, private).await,
         }
     }
 
-    async fn import(&mut self, resource_type: &str, id: &str) -> std::result::Result<v_::StateResult, anyhow::Error> {
-        match &mut *self {
+    async fn import(&self, resource_type: &str, id: &str) -> std::result::Result<v_::StateResult, anyhow::Error> {
+        match self {
             ProviderInner::V5(v) => return v.import(resource_type, id).await,
             ProviderInner::V6(v) => return v.import(resource_type, id).await,
         }
     }
 
     async fn plan(
-        &mut self,
+        &self,
         resource_type: &str,
         prior_state: Vec<u8>,
         proposed_new_state: Vec<u8>,
         config: Vec<u8>,
         prior_private: Vec<u8>,
     ) -> std::result::Result<v_::PlanResult, anyhow::Error> {
-        match &mut *self {
+        match self {
             ProviderInner::V5(v) => {
                 return v.plan(resource_type, prior_state, proposed_new_state, config, prior_private).await;
             },
@@ -166,14 +169,14 @@ impl v_::ProviderInnerImpl for ProviderInner {
     }
 
     async fn apply(
-        &mut self,
+        &self,
         resource_type: &str,
         prior_state: Vec<u8>,
         planned_state: Vec<u8>,
         config: Vec<u8>,
         planned_private: Vec<u8>,
     ) -> std::result::Result<v_::StateResult, anyhow::Error> {
-        match &mut *self {
+        match self {
             ProviderInner::V5(v) => {
                 return v.apply(resource_type, prior_state, planned_state, config, planned_private).await;
             },
@@ -184,12 +187,12 @@ impl v_::ProviderInnerImpl for ProviderInner {
     }
 
     async fn upgrade_resource_state(
-        &mut self,
+        &self,
         resource_type: &str,
         version: i64,
         raw_state_json: Vec<u8>,
     ) -> std::result::Result<Vec<u8>, anyhow::Error> {
-        match &mut *self {
+        match self {
             ProviderInner::V5(v) => return v.upgrade_resource_state(resource_type, version, raw_state_json).await,
             ProviderInner::V6(v) => return v.upgrade_resource_state(resource_type, version, raw_state_json).await,
         }

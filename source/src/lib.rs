@@ -73,6 +73,33 @@ pub struct ResourceState {
     pub private: Vec<u8>,
 }
 
+pub const DATA_SOURCE_PREFIX: &str = "data.";
+
+#[derive(Debug, Clone)]
+pub struct RequiresReplace {
+    pub resource_type: String,
+    pub paths: Vec<Vec<String>>,
+}
+
+impl std::fmt::Display for RequiresReplace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let paths: Vec<String> = self.paths.iter().map(|p| p.join(".")).collect();
+        return write!(
+            f,
+            "One or more changed parameters ({}) require resource [{}] to be deleted and recreated, cannot modify",
+            paths.join(", "),
+            self.resource_type
+        );
+    }
+}
+
+impl std::error::Error for RequiresReplace { }
+
+#[derive(Debug, Clone)]
+pub struct ModifyPlan {
+    pub requires_replace: Vec<Vec<String>>,
+}
+
 #[derive(Clone)]
 pub struct ExTerra {
     provider_shared: ProviderShared,
@@ -134,6 +161,17 @@ impl Provider {
         return self.p.list_resource_types();
     }
 
+    pub fn list_datasource_types(&self) -> Vec<String> {
+        return self.p.list_datasource_types();
+    }
+
+    fn block_for(&self, type_: &str) -> Result<crate::encoding::SchemaBlock, anyhow::Error> {
+        if let Some(ds) = type_.strip_prefix(DATA_SOURCE_PREFIX) {
+            return self.p.get_datasource_schema(ds);
+        }
+        return self.p.get_resource_schema(type_);
+    }
+
     /// OS pid of the provider process.  It is killed when this `Provider` is dropped.
     pub fn process_id(&self) -> u32 {
         return self.p.process_id();
@@ -150,7 +188,7 @@ impl Provider {
     }
 
     pub fn params_schemask(&self, resource_type: &str) -> Result<SchemaskV1, anyhow::Error> {
-        let block = self.p.get_resource_schema(resource_type)?;
+        let block = self.block_for(resource_type)?;
         return Ok(
             single_schemask(
                 "Params",
@@ -160,7 +198,7 @@ impl Provider {
     }
 
     pub fn state_schemask(&self, resource_type: &str) -> Result<SchemaskV1, anyhow::Error> {
-        let block = self.p.get_resource_schema(resource_type)?;
+        let block = self.block_for(resource_type)?;
         return Ok(
             single_schemask(
                 "State",
@@ -170,7 +208,7 @@ impl Provider {
     }
 
     async fn maybe_upgrade_state(
-        &mut self,
+        &self,
         resource_type: &str,
         state: ResourceState,
     ) -> Result<ResourceState, anyhow::Error> {
@@ -183,11 +221,7 @@ impl Provider {
         return Ok(state);
     }
 
-    pub async fn refresh(
-        &mut self,
-        resource_type: &str,
-        state: ResourceState,
-    ) -> Result<ResourceState, anyhow::Error> {
+    pub async fn refresh(&self, resource_type: &str, state: ResourceState) -> Result<ResourceState, anyhow::Error> {
         let state = self.maybe_upgrade_state(resource_type, state).await?;
         check_schema(&self.state_schemask(resource_type)?, &state.state)?;
         let current_mp = state_to_msgpack(&state)?;
@@ -196,7 +230,7 @@ impl Provider {
         return Ok(state_from_msgpack(&new.state, new.private, current_version)?);
     }
 
-    pub async fn import(&mut self, resource_type: &str, id: &str) -> Result<ResourceState, anyhow::Error> {
+    pub async fn import(&self, resource_type: &str, id: &str) -> Result<ResourceState, anyhow::Error> {
         // Import typically only seeds the id; Terraform always follows it with a read to
         // populate the rest of the state.
         let imported = self.p.import(resource_type, id).await?;
@@ -209,8 +243,8 @@ impl Provider {
         return Ok(state);
     }
 
-    pub async fn create(&mut self, type_: &str, input: Params) -> Result<ResourceState, anyhow::Error> {
-        if let Some(datasource_type) = type_.strip_prefix("data.") {
+    pub async fn create(&self, type_: &str, input: Params) -> Result<ResourceState, anyhow::Error> {
+        if let Some(datasource_type) = type_.strip_prefix(DATA_SOURCE_PREFIX) {
             let block = self.p.get_datasource_schema(datasource_type)?;
             check_schema(
                 &single_schemask(
@@ -240,12 +274,22 @@ impl Provider {
         return Ok(state_from_msgpack(&new.state, new.private, current_version)?);
     }
 
-    pub async fn modify(
-        &mut self,
+    pub async fn plan_modify(
+        &self,
         resource_type: &str,
         state: ResourceState,
         params: Params,
-    ) -> Result<ResourceState, anyhow::Error> {
+    ) -> Result<ModifyPlan, anyhow::Error> {
+        let (plan, _, _, _) = self.plan_modify_inner(resource_type, state, params).await?;
+        return Ok(ModifyPlan { requires_replace: plan.requires_replace });
+    }
+
+    async fn plan_modify_inner(
+        &self,
+        resource_type: &str,
+        state: ResourceState,
+        params: Params,
+    ) -> Result<(crate::provider::v_::PlanResult, Vec<u8>, Vec<u8>, ResourceState), anyhow::Error> {
         let state = self.maybe_upgrade_state(resource_type, state).await?;
         check_schema(&self.state_schemask(resource_type)?, &state.state)?;
         check_schema(&self.params_schemask(resource_type)?, &serde_json::Value::Object(params.0.clone()))?;
@@ -270,21 +314,32 @@ impl Provider {
         let mut proposed_mp = Vec::new();
         encode_block(&block.attrs, &block.blocks, &proposed, true, &mut proposed_mp)?;
         let plan =
-            self.p.plan(&resource_type, prior_mp.clone(), proposed_mp, config_mp.clone(), state.private).await?;
-        if plan.requires_replace {
-            return Err(
-                anyhow::anyhow!(
-                    "One or more changed parameters require resource [{}] to be deleted and recreated, cannot modify",
-                    resource_type
-                ),
-            );
+            self
+                .p
+                .plan(&resource_type, prior_mp.clone(), proposed_mp, config_mp.clone(), state.private.clone())
+                .await?;
+        return Ok((plan, prior_mp, config_mp, state));
+    }
+
+    pub async fn modify(
+        &self,
+        resource_type: &str,
+        state: ResourceState,
+        params: Params,
+    ) -> Result<ResourceState, anyhow::Error> {
+        let (plan, prior_mp, config_mp, _state) = self.plan_modify_inner(resource_type, state, params).await?;
+        if !plan.requires_replace.is_empty() {
+            return Err(anyhow::Error::new(RequiresReplace {
+                resource_type: resource_type.to_string(),
+                paths: plan.requires_replace,
+            }));
         }
         let new = self.p.apply(resource_type, prior_mp, plan.planned_state, config_mp, plan.planned_private).await?;
         let current_version = self.p.get_resource_schema_version(resource_type)?;
         return Ok(state_from_msgpack(&new.state, new.private, current_version)?);
     }
 
-    pub async fn delete(&mut self, resource_type: &str, state: ResourceState) -> Result<(), anyhow::Error> {
+    pub async fn delete(&self, resource_type: &str, state: ResourceState) -> Result<(), anyhow::Error> {
         let state = self.maybe_upgrade_state(resource_type, state).await?;
         check_schema(&self.state_schemask(resource_type)?, &state.state)?;
         let prior_mp = state_to_msgpack(&state)?;
@@ -555,7 +610,7 @@ mod tests {
     }
 
     async fn run_create(
-        p: &mut Provider,
+        p: &Provider,
         target_file: &Path,
         content: &str,
     ) -> anyhow::Result<ResourceState, anyhow::Error> {
@@ -587,7 +642,7 @@ mod tests {
             let work_dir = TempDir::new()?;
             let target = work_dir.path().join("input.txt");
             std::fs::write(&target, "datasource content")?;
-            let mut p = provider(binary).await?;
+            let p = provider(binary).await?;
             let state =
                 p
                     .create(
@@ -614,8 +669,8 @@ mod tests {
         for binary in BINARIES {
             let work_dir = TempDir::new()?;
             let target = work_dir.path().join("hello.txt");
-            let mut p = provider(binary).await?;
-            run_create(&mut p, &target, "hello exterra").await?;
+            let p = provider(binary).await?;
+            run_create(&p, &target, "hello exterra").await?;
             assert!(target.exists(), "managed file was not created");
             assert_eq!(std::fs::read_to_string(&target)?, "hello exterra");
         }
@@ -627,23 +682,23 @@ mod tests {
         for binary in BINARIES {
             let work_dir = TempDir::new()?;
             let target = work_dir.path().join("hello.txt");
-            let mut p = provider(binary).await?;
-            let state = run_create(&mut p, &target, "original content").await?;
-            p
-                .modify(
-                    "local_file",
-                    state,
-                    Params(
-                        [
-                            (format!("filename"), serde_json::Value::String(target.to_str().unwrap().to_string())),
-                            (format!("content"), serde_json::Value::String(format!("updated content"))),
-                        ]
-                            .into_iter()
-                            .collect(),
-                    ),
-                )
-                .await
-                .expect_err("modify with ForceNew change should fail");
+            let p = provider(binary).await?;
+            let state = run_create(&p, &target, "original content").await?;
+            let params =
+                Params(
+                    [
+                        (format!("filename"), serde_json::Value::String(target.to_str().unwrap().to_string())),
+                        (format!("content"), serde_json::Value::String(format!("updated content"))),
+                    ]
+                        .into_iter()
+                        .collect(),
+                );
+            let plan = p.plan_modify("local_file", state.clone(), params.clone()).await?;
+            assert_eq!(plan.requires_replace, vec![vec!["content".to_string()]]);
+            let err =
+                p.modify("local_file", state, params).await.expect_err("modify with ForceNew change should fail");
+            let rr = err.downcast_ref::<crate::RequiresReplace>().expect("typed RequiresReplace error");
+            assert_eq!(rr.paths, vec![vec!["content".to_string()]]);
         }
         return Ok(());
     }
@@ -656,8 +711,8 @@ mod tests {
             // modify should refuse.
             let work_dir = TempDir::new()?;
             let target = work_dir.path().join("hello.txt");
-            let mut p = provider(binary).await?;
-            let state = run_create(&mut p, &target, "original content").await?;
+            let p = provider(binary).await?;
+            let state = run_create(&p, &target, "original content").await?;
             let err =
                 p
                     .modify(
@@ -686,8 +741,8 @@ mod tests {
         for binary in BINARIES {
             let work_dir = TempDir::new()?;
             let target = work_dir.path().join("hello.txt");
-            let mut p = provider(binary).await?;
-            let state = run_create(&mut p, &target, "refresh me").await?;
+            let p = provider(binary).await?;
+            let state = run_create(&p, &target, "refresh me").await?;
 
             // State must survive a JSON round trip, including the private bytes field.
             let json = serde_json::to_string(&state)?;
@@ -708,8 +763,8 @@ mod tests {
         for binary in BINARIES {
             let work_dir = TempDir::new()?;
             let target = work_dir.path().join("hello.txt");
-            let mut p = provider(binary).await?;
-            let state = run_create(&mut p, &target, "to be deleted").await?;
+            let p = provider(binary).await?;
+            let state = run_create(&p, &target, "to be deleted").await?;
             assert!(target.exists(), "file should exist before delete");
             p.delete(RESOURCE_TYPE, state).await?;
             assert!(!target.exists(), "managed file should have been deleted");
